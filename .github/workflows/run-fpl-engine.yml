@@ -41,3 +41,29 @@ jobs:
           name: fpl-engine-csvs
           path: |
             *.csv
+
+                  - name: Email results
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_SERVER }}
+          server_port: 587
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "FPL engine results (GitHub Actions run #${{ github.run_number }})"
+          from: ${{ secrets.EMAIL_FROM }}
+          to: ${{ secrets.EMAIL_TO }}
+          secure: true
+          body: |
+            This is an automated email from your FPL prediction + optimisation engine.
+
+            The latest GitHub Actions run has completed successfully and the CSV
+            outputs have been generated and uploaded as an artifact.
+
+            You can also view the run details here:
+            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            (Summarised recommendations will be added later.)
+          # Attach the zipped CSVs generated earlier
+          attachments: fpl-engine-csvs.zip
+
+          
