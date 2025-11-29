@@ -1,0 +1,43 @@
+name: Run FPL Engine
+
+on:
+  # Manual trigger from the GitHub UI
+  workflow_dispatch:
+
+  # Scheduled run: every Friday at 08:00 UK time (approx)
+  schedule:
+    - cron: '0 8 * * FRI'
+
+jobs:
+  run-engine:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Check out your repo
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. Set up Python
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # 3. Install dependencies
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      # 4. Run the engine script
+      - name: Run FPL engine
+        run: |
+          python engine_gw13.py
+
+      # 5. Upload CSV outputs as build artifacts so you can download them
+      - name: Upload CSV outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: fpl-engine-csvs
+          path: |
+            *.csv
