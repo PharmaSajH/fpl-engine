@@ -1,95 +1,85 @@
 name: Run FPL Engine
 
 on:
-  # Manual trigger from GitHub UI
   workflow_dispatch:
-
-  # Schedule: every Friday at 08:00 UK time
   schedule:
-    - cron: '0 8 * * FRI'
+    - cron: "0 8 * * FRI"   # Every Friday at 08:00 UK time (adjust if needed)
 
 jobs:
   run-engine:
     runs-on: ubuntu-latest
 
     steps:
-      # ---------------------------------------------
-      # 1. Check out repo
-      # ---------------------------------------------
+      # -------------------------
+      # 1. Checkout repository
+      # -------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ---------------------------------------------
+      # -------------------------
       # 2. Set up Python
-      # ---------------------------------------------
+      # -------------------------
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
-      # ---------------------------------------------
+      # -------------------------
       # 3. Install dependencies
-      # ---------------------------------------------
+      # -------------------------
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      # ---------------------------------------------
-      # 4. Run your FPL engine
-      # ---------------------------------------------
-      - name: Run FPL engine
+      # -------------------------
+      # 4. Run the FPL engine
+      # -------------------------
+      - name: Run FPL Engine
         run: |
           python engine_gw13.py
 
-      # ---------------------------------------------
-      # 5. Create a stable artifacts directory
-      # ---------------------------------------------
+      # -------------------------
+      # 5. Zip CSV outputs
+      # -------------------------
       - name: Zip CSV outputs
         run: |
-          mkdir artifacts
-          # Zip CSVs only if they exist
-          if ls *.csv 1> /dev/null 2>&1; then
-            zip artifacts/fpl-engine-csvs.zip *.csv
-          else
-            echo "No CSV files were generated!"
-            echo "Creating empty zip to prevent failure."
-            zip artifacts/fpl-engine-csvs.zip /dev/null
-          fi
+          zip -r fpl-engine-csvs.zip *.csv
 
-      # ---------------------------------------------
-      # 6. Upload ZIP as GitHub artifact
-      # ---------------------------------------------
-      - name: Upload CSV outputs
+      # -------------------------
+      # 6. Upload zipped CSV artifact
+      # -------------------------
+      - name: Upload CSV artifacts
         uses: actions/upload-artifact@v4
         with:
           name: fpl-engine-csvs
-          path: artifacts/fpl-engine-csvs.zip
+          path: fpl-engine-csvs.zip
 
-      # ---------------------------------------------
-      # 7. Email results (Gmail SMTP)
-      # ---------------------------------------------
+      # -------------------------
+      # 7. Send email via Gmail (STARTTLS)
+      # -------------------------
       - name: Email results
         uses: dawidd6/action-send-mail@v3
         with:
-          server_address: ${{ secrets.SMTP_SERVER }}
+          server_address: smtp.gmail.com
           server_port: 587
+          secure: starttls
           username: ${{ secrets.SMTP_USERNAME }}
           password: ${{ secrets.SMTP_PASSWORD }}
+
           from: ${{ secrets.EMAIL_FROM }}
           to: ${{ secrets.EMAIL_TO }}
-          secure: true
           subject: "FPL Engine Results (Run #${{ github.run_number }})"
           body: |
             Your automated FPL prediction + optimisation engine has completed.
 
-            ✔ Run status: SUCCESS
-            ✔ Engine executed via GitHub Actions
-            ✔ CSV outputs generated and attached
+            ✔ GitHub Action Run ID: ${{ github.run_id }}
+            ✔ Repository: ${{ github.repository }}
 
-            Run details:
+            CSV outputs are attached.
+            A summary module will be added later.
+
+            Direct link to run:
             ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
-            Summaries will be added later.
-
-          attachments: artifacts/fpl-engine-csvs.zip
+          attachments: fpl-engine-csvs.zip
