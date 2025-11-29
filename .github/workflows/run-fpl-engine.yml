@@ -34,15 +34,20 @@ jobs:
         run: |
           python engine_gw13.py
 
-      # 5. Upload CSV outputs as build artifacts so you can download them
+      # 5. Zip all CSV outputs
+      - name: Zip outputs
+        run: |
+          zip -r fpl-engine-csvs.zip *.csv
+
+      # 6. Upload CSV outputs as artifacts
       - name: Upload CSV outputs
         uses: actions/upload-artifact@v4
         with:
           name: fpl-engine-csvs
-          path: |
-            *.csv
+          path: fpl-engine-csvs.zip
 
-                  - name: Email results
+      # 7. Email results
+      - name: Email results
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: ${{ secrets.SMTP_SERVER }}
@@ -56,14 +61,11 @@ jobs:
           body: |
             This is an automated email from your FPL prediction + optimisation engine.
 
-            The latest GitHub Actions run has completed successfully and the CSV
-            outputs have been generated and uploaded as an artifact.
+            The latest GitHub Actions run has completed successfully, and CSV
+            outputs have been generated.
 
-            You can also view the run details here:
+            You can download the artifact here:
             ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
-            (Summarised recommendations will be added later.)
-          # Attach the zipped CSVs generated earlier
+            (Summaries will be included later.)
           attachments: fpl-engine-csvs.zip
-
-          
