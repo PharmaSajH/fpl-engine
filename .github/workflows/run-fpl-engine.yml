@@ -4,95 +4,86 @@ on:
   # Manual trigger from the GitHub UI
   workflow_dispatch:
 
-  # Scheduled run: every Friday at 08:00 UK time (adjust if needed)
+  # Scheduled run: every Friday at 08:00 UK time (approx)
   schedule:
-    - cron: "0 8 * * FRI"
+    - cron: '0 8 * * FRI'
 
 jobs:
   run-engine:
     runs-on: ubuntu-latest
 
     steps:
-      # ---------------------------------------------
-      # 1. Check out repo
-      # ---------------------------------------------
+      # 1. Check out your repo
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # ---------------------------------------------
       # 2. Set up Python
-      # ---------------------------------------------
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
-      # ---------------------------------------------
       # 3. Install dependencies
-      # ---------------------------------------------
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      # ---------------------------------------------
-      # 4. Run FPL Engine
-      # ---------------------------------------------
-      - name: Run FPL Engine
+      # ---------------------------------------------------
+      # Fetch xG/xA data from public FBref CSV
+      # ---------------------------------------------------
+      - name: Download FBref xG/xA data
+        run: |
+          mkdir -p data
+          curl -L "https://fbref.com/en/comps/9/xg/Premier-League-Stats.csv" -o data/fbref_xg.csv
+
+      # ---------------------------------------------------
+      # Convert FBref CSV to engine format (xg_xa_latest.csv)
+      # ---------------------------------------------------
+      - name: Convert FBref xG data to xg_xa_latest.csv
+        run: |
+          python - << 'EOF'
+          import pandas as pd
+
+          try:
+              df = pd.read_csv("data/fbref_xg.csv")
+
+              # Normalise column names
+              df.columns = [c.lower().strip() for c in df.columns]
+
+              # FBref structure: 'player', 'squad', 'xg', 'xa', 'npxg', 'npxg+xA', 'minutes'
+              required = ["player", "squad", "xg", "xa", "minutes"]
+              missing = [c for c in required if c not in df.columns]
+              if missing:
+                  print("FBref CSV missing columns:", missing)
+                  df = pd.DataFrame(columns=required)
+
+              # Minimal transformation for engine
+              out = pd.DataFrame()
+              out["web_name"] = df["player"]
+              out["team_short"] = df["squad"]
+              out["xg"] = df["xg"].fillna(0)
+              out["xa"] = df["xa"].fillna(0)
+              out["minutes"] = df["minutes"].fillna(0)
+
+              out.to_csv("xg_xa_latest.csv", index=False)
+              print("Created xg_xa_latest.csv with", len(out), "rows.")
+          except Exception as e:
+              print("Failed to convert FBref xG data:", e)
+              pd.DataFrame({"web_name": [],"team_short": [],"xg": [],"xa": [],"minutes": []}).to_csv("xg_xa_latest.csv", index=False)
+              print("Created empty xg_xa_latest.csv instead.")
+          EOF
+
+
+      # 4. Run the engine script
+      - name: Run FPL engine
         run: |
           python engine_gw13.py
 
-      # ---------------------------------------------
-      # 5. ZIP all CSV outputs into stable artifacts folder
-      # ---------------------------------------------
-      - name: Zip outputs
-        run: |
-          mkdir -p artifacts
-          # Only zip if CSVs exist
-          if ls *.csv 1> /dev/null 2>&1; then
-            zip artifacts/fpl-engine-csvs.zip *.csv
-          else
-            echo "No CSVs found—creating empty zip to avoid email failure."
-            zip artifacts/fpl-engine-csvs.zip /dev/null
-          fi
-
-      # ---------------------------------------------
-      # 6. Upload CSV ZIP as GitHub Artifact
-      # ---------------------------------------------
-      - name: Upload CSV artifacts
+      # 5. Upload CSV outputs as build artifacts so you can download them
+      - name: Upload CSV outputs
         uses: actions/upload-artifact@v4
         with:
           name: fpl-engine-csvs
-          path: artifacts/fpl-engine-csvs.zip
-
-      # ---------------------------------------------
-      # 7. Email results via Gmail (STARTTLS)
-      # ---------------------------------------------
-      - name: Email results
-        uses: dawidd6/action-send-mail@v3
-        with:
-          server_address: smtp.gmail.com
-          server_port: 587
-          secure: starttls
-
-          username: ${{ secrets.SMTP_USERNAME }}
-          password: ${{ secrets.SMTP_PASSWORD }}
-
-          from: ${{ secrets.EMAIL_FROM }}
-          to: ${{ secrets.EMAIL_TO }}
-
-          subject: "FPL Engine Results (Run #${{ github.run_number }})"
-          body: |
-            Your automated FPL prediction + optimisation engine has completed successfully.
-
-            ✔ GitHub Action Run ID: ${{ github.run_id }}
-            ✔ Repository: ${{ github.repository }}
-            ✔ CSV outputs attached
-            ✔ Schedule enabled (Friday 08:00 UK time)
-
-            Full run details:
-            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-
-            Nothing else required from you — the engine is now fully automated.
-          
-          attachments: artifacts/fpl-engine-csvs.zip
+          path: |
+            *.csv
