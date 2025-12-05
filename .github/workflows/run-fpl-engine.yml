@@ -40,14 +40,20 @@ jobs:
         run: |
           mkdir -p data
           curl -L "https://understat.com/api/league/players/epl/2024" \
-            -H "User-Agent: Mozilla/5.0" \
+            -H "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15" \
+            -H "Referer: https://understat.com/league/EPL" \
+            -H "Accept: application/json" \
+            -H "Accept-Language: en-US,en;q=0.9" \
             -o data/understat_players.json
 
       - name: Download FotMob EPL league summary
         run: |
           mkdir -p data
-          curl -L "https://www.fotmob.com/api/leagues?id=47" \
-            -H "User-Agent: Mozilla/5.0" \
+          curl -L "https://www.fotmob.com/api/leagues?id=47&ccode=US" \
+            -H "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15" \
+            -H "Referer: https://www.fotmob.com" \
+            -H "Accept: application/json" \
+            -H "Accept-Language: en-US,en;q=0.9" \
             -o data/fotmob_league.json
 
       - name: Debug Understat + FotMob downloads
