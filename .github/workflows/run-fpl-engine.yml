@@ -33,7 +33,7 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
       # -------------------------------------------------------
-      # 4. Fetch and parse FBref xG/xA (HTML → CSV)
+      # 4. Fetch and parse FBref xG/xA (robust HTML → CSV)
       # -------------------------------------------------------
       - name: Download FBref HTML
         run: |
@@ -42,13 +42,12 @@ jobs:
             -H "User-Agent: Mozilla/5.0" \
             -o data/fbref.html
 
-      - name: Extract xG/xA from FBref HTML
+      - name: Extract xG/xA from FBref HTML (robust)
         run: |
           python - << 'EOF'
           import pandas as pd
           import numpy as np
 
-          # Mapping FBref team names -> FPL team_short codes
           TEAM_MAP = {
               "Arsenal": "ARS",
               "Aston Villa": "AVL",
@@ -71,19 +70,62 @@ jobs:
               "Wolverhampton Wanderers": "WOL",
           }
 
+          def normalize_name(s):
+              return (
+                  str(s)
+                  .lower()
+                  .replace("-", " ")
+                  .replace("’", "'")
+                  .replace("`", "'")
+                  .strip()
+              )
+
           try:
-              # Parse ONLY the "Expected" stats table from the page
-              tables = pd.read_html("data/fbref.html", match="Expected")
-              df = tables[0]
+              tables = pd.read_html("data/fbref.html")
+              print(f"[DEBUG] Loaded {len(tables)} tables from FBref.")
+
+              candidate = None
+              for i, t in enumerate(tables):
+                  cols = [c.lower().strip() for c in t.columns]
+                  if any("xg" in c for c in cols) and any("xa" in c for c in cols):
+                      print(f"[DEBUG] Found candidate xG table at index {i}.")
+                      candidate = t.copy()
+                      break
+
+              if candidate is None:
+                  raise Exception("No table with xG/xA found in FBref page")
+
+              df = candidate
               df.columns = [c.lower().strip() for c in df.columns]
 
-              # Required columns check
-              needed = ["player", "squad", "xg", "xa", "minutes"]
-              for col in needed:
-                  if col not in df.columns:
-                      raise Exception(f"Missing column: {col}")
+              # Identify minutes column
+              if "minutes" in df.columns:
+                  minutes_col = "minutes"
+              elif "min" in df.columns:
+                  minutes_col = "min"
+              elif "90s" in df.columns:
+                  minutes_col = "90s"
+              else:
+                  raise Exception("Could not find minutes/min/90s column")
 
-              # Normalise player names
+              minutes = pd.to_numeric(df[minutes_col], errors="coerce").fillna(0)
+              if minutes_col == "90s":
+                  minutes = minutes * 90
+
+              # Identify xG/xA columns
+              def find_col(candidates):
+                  for cand in candidates:
+                      if cand in df.columns:
+                          return cand
+                  return None
+
+              xg_col = find_col(["xg", "expected", "npxg"])
+              xa_col = find_col(["xa", "assisted", "xag", "xg assisted"])
+
+              if xg_col is None or xa_col is None:
+                  raise Exception(f"Could not find xg/xa columns; xg={xg_col}, xa={xa_col}")
+
+              # Normalize player and squad names
               df["player"] = (
                   df["player"]
                   .astype(str)
@@ -91,30 +133,28 @@ jobs:
                   .str.strip()
               )
 
-              # Map team names
               df["team_short"] = df["squad"].map(TEAM_MAP).fillna(df["squad"])
 
               # Build final output
               out = pd.DataFrame({
                   "web_name": df["player"],
                   "team_short": df["team_short"],
-                  "xg": pd.to_numeric(df["xg"], errors="coerce").fillna(0),
-                  "xa": pd.to_numeric(df["xa"], errors="coerce").fillna(0),
-                  "minutes": pd.to_numeric(df["minutes"], errors="coerce").fillna(0),
+                  "xg": pd.to_numeric(df[xg_col], errors="coerce").fillna(0),
+                  "xa": pd.to_numeric(df[xa_col], errors="coerce").fillna(0),
+                  "minutes": minutes,
               })
 
               out.to_csv("xg_xa_latest.csv", index=False)
-              print("SUCCESS: Created xg_xa_latest.csv with", len(out), "rows.")
+              print(f"[SUCCESS] Created xg_xa_latest.csv with {len(out)} rows.")
 
           except Exception as e:
-              print("ERROR extracting FBref xG/xA:", e)
-              print("Writing EMPTY fallback file.")
+              print("[ERROR] FBref xG extraction failed:", e)
+              print("[DEBUG] Writing empty fallback CSV.")
               pd.DataFrame(
                   {"web_name": [], "team_short": [], "xg": [], "xa": [], "minutes": []}
               ).to_csv("xg_xa_latest.csv", index=False)
 
           EOF
-
       # -------------------------------------------------------
       # 5. Run engine
       # -------------------------------------------------------
