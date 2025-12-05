@@ -42,7 +42,7 @@ jobs:
             -H "User-Agent: Mozilla/5.0" \
             -o data/fbref.html
 
-    - name: Extract xG/xA from FBref HTML (BeautifulSoup)
+      - name: Extract xG/xA from FBref HTML (BeautifulSoup)
         run: |
           python -m pip install --quiet beautifulsoup4 lxml
           python - << 'EOF'
