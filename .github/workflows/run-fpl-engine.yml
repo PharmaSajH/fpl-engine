@@ -1,0 +1,178 @@
+name: Run FPL Engine
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 8 * * FRI"
+
+jobs:
+  run-engine:
+    runs-on: ubuntu-latest
+
+    steps:
+      # -------------------------------------------------------
+      # 1. Checkout repo
+      # -------------------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # -------------------------------------------------------
+      # 2. Set up Python
+      # -------------------------------------------------------
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # -------------------------------------------------------
+      # 3. Install dependencies
+      # -------------------------------------------------------
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      # -------------------------------------------------------
+      # 4. Fetch FBref xG/xA
+      # -------------------------------------------------------
+      - name: Download FBref xG/xA data
+        run: |
+          mkdir -p data
+          curl -L "https://fbref.com/en/comps/9/xg/Premier-League-Stats.csv" -o data/fbref_xg.csv
+
+      - name: Convert FBref → xg_xa_latest.csv
+        run: |
+          python - << 'EOF'
+          import pandas as pd
+          try:
+              df = pd.read_csv("data/fbref_xg.csv")
+              df.columns = [c.lower().strip() for c in df.columns]
+
+              required = ["player", "squad", "xg", "xa", "minutes"]
+              for c in required:
+                  if c not in df.columns:
+                      raise Exception("Missing column: " + c)
+
+              out = pd.DataFrame()
+              out["web_name"] = df["player"]
+              out["team_short"] = df["squad"]
+              out["xg"] = df["xg"].fillna(0)
+              out["xa"] = df["xa"].fillna(0)
+              out["minutes"] = df["minutes"].fillna(0)
+
+              out.to_csv("xg_xa_latest.csv", index=False)
+              print("Created xg_xa_latest.csv")
+          except Exception as e:
+              print("Could not parse xG data:", e)
+              pd.DataFrame({"web_name": [],"team_short": [],"xg": [],"xa": [],"minutes": []}).to_csv("xg_xa_latest.csv", index=False)
+          EOF
+
+      # -------------------------------------------------------
+      # 5. Run engine
+      # -------------------------------------------------------
+      - name: Run FPL engine
+        run: python engine_gw13.py
+
+      # -------------------------------------------------------
+      # 6. Generate plain-text summary for email
+      # -------------------------------------------------------
+      - name: Build email summary
+        id: summary
+        run: |
+          echo "Creating email summary..."
+
+          SUMMARY="FPL Engine Summary\n\n"
+
+          # Captain
+          if ls gw*_myteam.csv 1> /dev/null 2>&1; then
+            CAPTAIN=$(python - << 'EOF'
+import pandas as pd, glob
+df = pd.read_csv(glob.glob("gw*_myteam.csv")[0])
+df = df.sort_values("multi_gw_points", ascending=False)
+top = df.iloc[0]
+print(f"Suggested Captain: {top.web_name} ({top.team_short}) — {top.multi_gw_points:.2f} pts")
+EOF
+)
+            SUMMARY="$SUMMARY$CAPTAIN\n\n"
+          fi
+
+          # Single transfer
+          if ls gw*_transfer_suggestions.csv 1> /dev/null 2>&1; then
+            SINGLE=$(python - << 'EOF'
+import pandas as pd, glob
+df = pd.read_csv(glob.glob("gw*_transfer_suggestions.csv")[0])
+top = df.iloc[0]
+print(f"Top Single Transfer:\nSell {top.sell_name} → Buy {top.buy_name} (Gain: {top.gain:.2f})")
+EOF
+)
+            SUMMARY="$SUMMARY$SINGLE\n\n"
+          fi
+
+          # Double transfer
+          if ls gw*_double_transfers.csv 1> /dev/null 2>&1; then
+            DOUBLE=$(python - << 'EOF'
+import pandas as pd, glob
+df = pd.read_csv(glob.glob("gw*_double_transfers.csv")[0])
+top = df.iloc[0]
+print(f"Top Double Transfer:\nSell {top.sell1} & {top.sell2} → Buy {top.buy1} & {top.buy2} (Net Gain: {top.net_gain:.2f})")
+EOF
+)
+            SUMMARY="$SUMMARY$DOUBLE\n\n"
+          fi
+
+          echo "$SUMMARY" > summary.txt
+          echo "summary_out<<EOF" >> $GITHUB_OUTPUT
+          echo "$SUMMARY" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      # -------------------------------------------------------
+      # 7. ZIP outputs
+      # -------------------------------------------------------
+      - name: Zip outputs
+        run: |
+          mkdir -p artifacts
+          zip artifacts/fpl-engine-csvs.zip *.csv
+
+      # -------------------------------------------------------
+      # 8. Upload artifacts
+      # -------------------------------------------------------
+      - name: Upload CSV artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: fpl-engine-csvs
+          path: artifacts/fpl-engine-csvs.zip
+
+      # -------------------------------------------------------
+      # 9. Send email with summary
+      # -------------------------------------------------------
+      - name: Email results
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 587
+          secure: starttls
+
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+
+          from: ${{ secrets.EMAIL_FROM }}
+          to: ${{ secrets.EMAIL_TO }}
+
+          subject: "FPL Engine Results (Run #${{ github.run_number }})"
+
+          body: |
+            Your FPL engine run has completed.
+
+            =============================
+            FPL SUMMARY
+            =============================
+
+            ${{ steps.summary.outputs.summary_out }}
+
+            -----------------------------
+            Full run details:
+            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+            CSV outputs are attached.
+
+          attachments: artifacts/fpl-engine-csvs.zip
