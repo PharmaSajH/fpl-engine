@@ -33,41 +33,86 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
       # -------------------------------------------------------
-      # 4. Fetch FBref xG/xA
+      # 4. Fetch and parse FBref xG/xA (HTML → CSV)
       # -------------------------------------------------------
-      - name: Download FBref xG/xA data
+      - name: Download FBref HTML
         run: |
           mkdir -p data
-          curl -L "https://fbref.com/en/comps/9/xg/Premier-League-Stats.csv" -o data/fbref_xg.csv
+          curl -L "https://fbref.com/en/comps/9/Premier-League-Stats" \
+            -H "User-Agent: Mozilla/5.0" \
+            -o data/fbref.html
 
-      - name: Convert FBref → xg_xa_latest.csv
+      - name: Extract xG/xA from FBref HTML
         run: |
           python - << 'EOF'
           import pandas as pd
+          import numpy as np
+
+          # Mapping FBref team names -> FPL team_short codes
+          TEAM_MAP = {
+              "Arsenal": "ARS",
+              "Aston Villa": "AVL",
+              "Bournemouth": "BOU",
+              "Brentford": "BRE",
+              "Brighton": "BHA",
+              "Chelsea": "CHE",
+              "Crystal Palace": "CRY",
+              "Everton": "EVE",
+              "Fulham": "FUL",
+              "Liverpool": "LIV",
+              "Luton Town": "LUT",
+              "Manchester City": "MCI",
+              "Manchester Utd": "MUN",
+              "Newcastle Utd": "NEW",
+              "Nottingham Forest": "NFO",
+              "Sheffield Utd": "SHU",
+              "Tottenham": "TOT",
+              "West Ham": "WHU",
+              "Wolverhampton Wanderers": "WOL",
+          }
 
           try:
-              df = pd.read_csv("data/fbref_xg.csv")
+              # Parse ONLY the "Expected" stats table from the page
+              tables = pd.read_html("data/fbref.html", match="Expected")
+              df = tables[0]
               df.columns = [c.lower().strip() for c in df.columns]
 
-              required = ["player", "squad", "xg", "xa", "minutes"]
-              missing = [c for c in required if c not in df.columns]
-              if missing:
-                  raise Exception(f"Missing columns: {missing}")
+              # Required columns check
+              needed = ["player", "squad", "xg", "xa", "minutes"]
+              for col in needed:
+                  if col not in df.columns:
+                      raise Exception(f"Missing column: {col}")
 
-              out = pd.DataFrame()
-              out["web_name"] = df["player"]
-              out["team_short"] = df["squad"]
-              out["xg"] = df["xg"].fillna(0)
-              out["xa"] = df["xa"].fillna(0)
-              out["minutes"] = df["minutes"].fillna(0)
+              # Normalise player names
+              df["player"] = (
+                  df["player"]
+                  .astype(str)
+                  .str.replace(r"\s+", " ", regex=True)
+                  .str.strip()
+              )
+
+              # Map team names
+              df["team_short"] = df["squad"].map(TEAM_MAP).fillna(df["squad"])
+
+              # Build final output
+              out = pd.DataFrame({
+                  "web_name": df["player"],
+                  "team_short": df["team_short"],
+                  "xg": pd.to_numeric(df["xg"], errors="coerce").fillna(0),
+                  "xa": pd.to_numeric(df["xa"], errors="coerce").fillna(0),
+                  "minutes": pd.to_numeric(df["minutes"], errors="coerce").fillna(0),
+              })
 
               out.to_csv("xg_xa_latest.csv", index=False)
-              print("Created xg_xa_latest.csv")
+              print("SUCCESS: Created xg_xa_latest.csv with", len(out), "rows.")
+
           except Exception as e:
-              print("Could not parse xG data:", e)
+              print("ERROR extracting FBref xG/xA:", e)
+              print("Writing EMPTY fallback file.")
               pd.DataFrame(
                   {"web_name": [], "team_short": [], "xg": [], "xa": [], "minutes": []}
               ).to_csv("xg_xa_latest.csv", index=False)
+
           EOF
 
       # -------------------------------------------------------
