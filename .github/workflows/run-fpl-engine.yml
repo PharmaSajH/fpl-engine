@@ -42,6 +42,13 @@ jobs:
             -H "User-Agent: Mozilla/5.0" \
             -o data/fbref_expected.csv
 
+      - name: Download FBref Expected Goals CSV
+        run: |
+          mkdir -p data
+          curl -L "https://fbref.com/en/comps/9/expected/Premier-League-Stats.csv" \
+            -H "User-Agent: Mozilla/5.0" \
+            -o data/fbref_expected.csv
+
       - name: Convert FBref Expected Goals → xg_xa_latest.csv
         run: |
           python - << 'EOF'
