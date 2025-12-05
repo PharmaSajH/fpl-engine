@@ -44,14 +44,15 @@ jobs:
         run: |
           python - << 'EOF'
           import pandas as pd
+
           try:
               df = pd.read_csv("data/fbref_xg.csv")
               df.columns = [c.lower().strip() for c in df.columns]
 
               required = ["player", "squad", "xg", "xa", "minutes"]
-              for c in required:
-                  if c not in df.columns:
-                      raise Exception("Missing column: " + c)
+              missing = [c for c in required if c not in df.columns]
+              if missing:
+                  raise Exception(f"Missing columns: {missing}")
 
               out = pd.DataFrame()
               out["web_name"] = df["player"]
@@ -64,7 +65,9 @@ jobs:
               print("Created xg_xa_latest.csv")
           except Exception as e:
               print("Could not parse xG data:", e)
-              pd.DataFrame({"web_name": [],"team_short": [],"xg": [],"xa": [],"minutes": []}).to_csv("xg_xa_latest.csv", index=False)
+              pd.DataFrame(
+                  {"web_name": [], "team_short": [], "xg": [], "xa": [], "minutes": []}
+              ).to_csv("xg_xa_latest.csv", index=False)
           EOF
 
       # -------------------------------------------------------
@@ -74,56 +77,74 @@ jobs:
         run: python engine_gw13.py
 
       # -------------------------------------------------------
-      # 6. Generate plain-text summary for email
+      # 6. Generate plain-text summary for email (pure Python)
       # -------------------------------------------------------
       - name: Build email summary
         id: summary
         run: |
-          echo "Creating email summary..."
+          python - << 'EOF'
+          import glob
+          import os
+          from pathlib import Path
 
-          SUMMARY="FPL Engine Summary\n\n"
+          import pandas as pd
 
-          # Captain
-          if ls gw*_myteam.csv 1> /dev/null 2>&1; then
-            CAPTAIN=$(python - << 'EOF'
-import pandas as pd, glob
-df = pd.read_csv(glob.glob("gw*_myteam.csv")[0])
-df = df.sort_values("multi_gw_points", ascending=False)
-top = df.iloc[0]
-print(f"Suggested Captain: {top.web_name} ({top.team_short}) — {top.multi_gw_points:.2f} pts")
-EOF
-)
-            SUMMARY="$SUMMARY$CAPTAIN\n\n"
-          fi
+          lines = ["FPL Engine Summary", ""]
 
-          # Single transfer
-          if ls gw*_transfer_suggestions.csv 1> /dev/null 2>&1; then
-            SINGLE=$(python - << 'EOF'
-import pandas as pd, glob
-df = pd.read_csv(glob.glob("gw*_transfer_suggestions.csv")[0])
-top = df.iloc[0]
-print(f"Top Single Transfer:\nSell {top.sell_name} → Buy {top.buy_name} (Gain: {top.gain:.2f})")
-EOF
-)
-            SUMMARY="$SUMMARY$SINGLE\n\n"
-          fi
+          # Captain suggestion
+          myteam_files = glob.glob("gw*_predictions_myteam.csv")
+          if myteam_files:
+              df = pd.read_csv(myteam_files[0])
+              if "multi_gw_points" in df.columns:
+                  df = df.sort_values("multi_gw_points", ascending=False)
+                  top = df.iloc[0]
+                  lines.append(
+                      f"Suggested Captain: {top.web_name} ({top.team_short}) — {top.multi_gw_points:.2f} pts"
+                  )
+                  lines.append("")
+              else:
+                  lines.append("Captain suggestion unavailable (multi_gw_points missing).")
+                  lines.append("")
 
-          # Double transfer
-          if ls gw*_double_transfers.csv 1> /dev/null 2>&1; then
-            DOUBLE=$(python - << 'EOF'
-import pandas as pd, glob
-df = pd.read_csv(glob.glob("gw*_double_transfers.csv")[0])
-top = df.iloc[0]
-print(f"Top Double Transfer:\nSell {top.sell1} & {top.sell2} → Buy {top.buy1} & {top.buy2} (Net Gain: {top.net_gain:.2f})")
-EOF
-)
-            SUMMARY="$SUMMARY$DOUBLE\n\n"
-          fi
+          # Single-transfer suggestion
+          single_files = glob.glob("gw*_transfer_suggestions.csv")
+          if single_files:
+              df = pd.read_csv(single_files[0])
+              if not df.empty:
+                  top = df.iloc[0]
+                  lines.append("Top Single Transfer:")
+                  lines.append(
+                      f"Sell {top.sell_name} → Buy {top.buy_name} (Gain: {top.gain:.2f})"
+                  )
+                  lines.append("")
 
-          echo "$SUMMARY" > summary.txt
-          echo "summary_out<<EOF" >> $GITHUB_OUTPUT
-          echo "$SUMMARY" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          # Double-transfer suggestion
+          double_files = glob.glob("gw*_double_transfers.csv")
+          if double_files:
+              df = pd.read_csv(double_files[0])
+              if not df.empty:
+                  top = df.iloc[0]
+                  lines.append("Top Double Transfer:")
+                  lines.append(
+                      f"Sell {top.sell1} & {top.sell2} → Buy {top.buy1} & {top.buy2} (Net Gain: {top.net_gain:.2f})"
+                  )
+                  lines.append("")
+
+          summary_text = "\n".join(lines)
+
+          # Write to file for debugging
+          Path("summary.txt").write_text(summary_text, encoding="utf-8")
+
+          # Expose via GITHUB_OUTPUT
+          gh_out = os.environ.get("GITHUB_OUTPUT")
+          if gh_out:
+              with open(gh_out, "a", encoding="utf-8") as f:
+                  print("summary_out<<EOF", file=f)
+                  f.write(summary_text + "\n")
+                  print("EOF", file=f)
+
+          print(summary_text)
+          EOF
 
       # -------------------------------------------------------
       # 7. ZIP outputs
@@ -143,7 +164,7 @@ EOF
           path: artifacts/fpl-engine-csvs.zip
 
       # -------------------------------------------------------
-      # 9. Send email with summary
+      # 9. Email results
       # -------------------------------------------------------
       - name: Email results
         uses: dawidd6/action-send-mail@v3
@@ -151,15 +172,11 @@ EOF
           server_address: smtp.gmail.com
           server_port: 587
           secure: starttls
-
           username: ${{ secrets.SMTP_USERNAME }}
           password: ${{ secrets.SMTP_PASSWORD }}
-
           from: ${{ secrets.EMAIL_FROM }}
           to: ${{ secrets.EMAIL_TO }}
-
           subject: "FPL Engine Results (Run #${{ github.run_number }})"
-
           body: |
             Your FPL engine run has completed.
 
@@ -174,5 +191,4 @@ EOF
             ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
             CSV outputs are attached.
-
           attachments: artifacts/fpl-engine-csvs.zip
