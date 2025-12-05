@@ -50,6 +50,20 @@ jobs:
             -H "User-Agent: Mozilla/5.0" \
             -o data/fotmob_league.json
 
+      - name: Debug Understat + FotMob downloads
+        run: |
+          echo "=== Understat file size ==="
+          wc -c data/understat_players.json || true
+
+          echo "=== Understat first 30 lines ==="
+          head -n 30 data/understat_players.json || true
+
+          echo "=== FotMob file size ==="
+          wc -c data/fotmob_league.json || true
+
+          echo "=== FotMob first 30 lines ==="
+          head -n 30 data/fotmob_league.json || true
+
       - name: Build unified expected stats dataset (Understat + FotMob + FPL API)
         run: |
           python -m pip install --quiet unidecode rapidfuzz
