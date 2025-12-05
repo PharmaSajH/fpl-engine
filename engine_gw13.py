@@ -17,7 +17,7 @@ OUTPUT_DOUBLE_CSV = None
 OUTPUT_MILP_PLAN_CSV = None
 
 # How much to penalise volatile players in robust EP
-ROBUST_ALPHA = 0.2  # try 0.3–0.7; higher = more risk averse
+ROBUST_ALPHA = 0.1  # try 0.3–0.7; higher = more risk averse
 
 # -------------------------------
 
@@ -89,10 +89,12 @@ def build_players_df(data):
 
     # --- VOLATILITY SCORE ---
     # Simple proxy: attacking involvement + instability in recent form
-    vol = (players["ga_per90"].fillna(0.0)
-           + (players["form"] - players["points_per_game"]).abs())
+    vol = (
+    0.5 * players["ga_per90"].fillna(0.0)
+    + 0.5 * (players["form"] - players["points_per_game"]).abs()
+    )
     # Clip to avoid weird outliers, roughly 0–5
-    players["volatility_score"] = vol.clip(0.0, 5.0)
+    players["volatility_score"] = vol.clip(0.0, 4.0)
     # ------------------------
 
     return players
@@ -251,9 +253,12 @@ def base_ep_from_poisson(row):
     Expected FPL points for a *full match* using:
       - team attacking λ_for / λ_against
       - clean sheet probability
-      - player attacking involvement
+      - player attacking involvement (xGI + historical GA)
+      - small form/PPG bump
 
-    Now upgraded to use xG/xA (xgi_per90) when available, with fallback to ga_per90.
+    xG/xA logic:
+      - If xg_coverage_flag == 1 -> involvement = 0.6 * xGI + 0.4 * GA_per90
+      - Else -> involvement = GA_per90 only (no xG penalty).
     """
     pos = row["position"]
 
@@ -261,23 +266,24 @@ def base_ep_from_poisson(row):
     lam_against = float(row.get("lambda_against", 1.2) or 1.2)
     cs_prob = float(row.get("cs_prob", 0.0) or 0.0)
 
-    # Base "involvement" from xG/xA if available; otherwise fall back to GA per 90.
     xgi90 = float(row.get("xgi_per90", 0.0) or 0.0)
     ga90 = float(row.get("ga_per90", 0.0) or 0.0)
+    has_xg = int(row.get("xg_coverage_flag", 0) or 0)
 
-    # Blend xG/xA with historical GA per 90 (just in case xG feed is sparse)
-    involvement = 0.7 * xgi90 + 0.3 * ga90
+    if has_xg:
+        involvement = 0.6 * xgi90 + 0.4 * ga90
+    else:
+        involvement = ga90
 
-    # Scaling factors per position (rough, literature-informed priors)
+    # Position-specific scoring factors (tuned slightly)
     if pos in ("FWD",):
-        # Big points from goals and some from assists
-        goal_factor = 4.0   # 4 pts per goal
-        assist_factor = 3.0 # 3 pts per assist
-        base_points = 2.0   # appearance, BPS, etc.
+        goal_factor = 4.0
+        assist_factor = 3.0
+        base_points = 2.5
     elif pos in ("MID",):
         goal_factor = 5.0
         assist_factor = 3.0
-        base_points = 2.5
+        base_points = 2.7
     elif pos in ("DEF", "GKP", "GK"):
         goal_factor = 6.0
         assist_factor = 3.0
@@ -287,23 +293,26 @@ def base_ep_from_poisson(row):
         assist_factor = 3.0
         base_points = 2.0
 
-    # Assume approx 60% of xGI is goals, 40% is assists (rough split)
     expected_goals = involvement * 0.6
     expected_assists = involvement * 0.4
 
     atk_points = expected_goals * goal_factor + expected_assists * assist_factor
 
-    # Clean sheet component for DEF/GK and mild for mids
+    # Clean sheet component – slightly nerfed vs raw FPL to avoid DEF dominance
     cs_points = 0.0
     if pos in ("DEF", "GKP", "GK"):
-        cs_points = cs_prob * 4.0
+        cs_points = cs_prob * 3.5  # was 4.0
     elif pos == "MID":
-        cs_points = cs_prob * 1.0
+        cs_points = cs_prob * 0.8  # was 1.0
 
-    # Small penalty for high λ_against (i.e. leaky team)
-    defence_penalty = max(0.0, (lam_against - 1.2)) * 0.5
+    defence_penalty = max(0.0, (lam_against - 1.2)) * 0.4  # slightly softer
 
-    ep_full_match = base_points + atk_points + cs_points - defence_penalty
+    # Mild form/PPG bump so elite attackers aren't crushed by volatility
+    form = float(row.get("form", 0.0) or 0.0)
+    ppg = float(row.get("points_per_game", 0.0) or 0.0)
+    form_boost = 0.05 * form + 0.03 * ppg
+
+    ep_full_match = base_points + atk_points + cs_points - defence_penalty + form_boost
     return max(ep_full_match, 0.0)
 
 def predict_gw_points(players, fixture_df):
@@ -419,18 +428,49 @@ def attach_manager_view(preds, picks_df):
     myteam = merged[merged["owned"]].copy()
     return merged, myteam
 
-def suggest_best_single_transfers_multi_gw(preds_all, myteam, bank_tenths):
+def suggest_best_single_transfers_multi_gw(
+    preds_all,
+    myteam,
+    bank_tenths,
+    min_minutes: int = 300,
+    min_selected_by: float = 0.5,
+    min_form: float = 0.0,
+    min_ppg: float = 0.0,
+):
     """1-transfer optimiser (multi GW), enforcing max 3 per club.
        Uses robust EP if available.
+
+       Now with safety filters:
+         - Excludes players with very low minutes / ownership.
+         - Optional form/PPG floors.
     """
     if myteam.empty:
         return None
 
-    # Choose metric: robust if available, else raw
     metric = "multi_gw_points_robust" if "multi_gw_points_robust" in preds_all.columns else "multi_gw_points"
 
     bank = (bank_tenths or 0) / 10.0
-    candidates_all = preds_all.sort_values(metric, ascending=False)
+
+    # Make a copy so we don't mutate preds_all
+    candidates_all = preds_all.copy()
+
+    # Ensure numeric columns
+    candidates_all["minutes"] = pd.to_numeric(candidates_all.get("minutes", 0), errors="coerce").fillna(0)
+    candidates_all["selected_by_percent"] = pd.to_numeric(candidates_all.get("selected_by_percent", 0.0), errors="coerce").fillna(0.0)
+    candidates_all["form"] = pd.to_numeric(candidates_all.get("form", 0.0), errors="coerce").fillna(0.0)
+    candidates_all["points_per_game"] = pd.to_numeric(candidates_all.get("points_per_game", 0.0), errors="coerce").fillna(0.0)
+
+    # === GLOBAL SAFETY FILTERS ===
+    candidates_all = candidates_all[
+        (candidates_all["minutes"] >= min_minutes)
+        & (candidates_all["selected_by_percent"] >= min_selected_by)
+        & (candidates_all["form"] >= min_form)
+        & (candidates_all["points_per_game"] >= min_ppg)
+    ]
+
+    # Rank globally by chosen EP metric
+    candidates_all = candidates_all.sort_values(metric, ascending=False)
+
     club_counts = myteam["team_short"].value_counts().to_dict()
     suggestions = []
 
@@ -446,9 +486,11 @@ def suggest_best_single_transfers_multi_gw(preds_all, myteam, bank_tenths):
 
         max_price = sell_price + bank
 
+        # Simulate selling this player
         club_counts_post_sell = club_counts.copy()
         club_counts_post_sell[sell_team] = club_counts_post_sell.get(sell_team, 1) - 1
 
+        # Filter pool by constraints
         pool = candidates_all[
             (candidates_all["position"] == pos)
             & (candidates_all["id"] != current_id)
@@ -526,6 +568,24 @@ def suggest_best_double_transfers_multi_gw(
 
     # Sort global candidates by chosen metric
     candidates_all = preds_all.sort_values(metric, ascending=False).copy()
+
+    # === NEW: safety filters for candidates ===
+    candidates_all["minutes"] = pd.to_numeric(candidates_all.get("minutes", 0), errors="coerce").fillna(0)
+    candidates_all["selected_by_percent"] = pd.to_numeric(candidates_all.get("selected_by_percent", 0.0), errors="coerce").fillna(0.0)
+    candidates_all["form"] = pd.to_numeric(candidates_all.get("form", 0.0), errors="coerce").fillna(0.0)
+    candidates_all["points_per_game"] = pd.to_numeric(candidates_all.get("points_per_game", 0.0), errors="coerce").fillna(0.0)
+
+    MIN_MINUTES = 300
+    MIN_SELECTED = 0.5
+    MIN_FORM = 0.0
+    MIN_PPG = 0.0
+
+    candidates_all = candidates_all[
+        (candidates_all["minutes"] >= MIN_MINUTES)
+        & (candidates_all["selected_by_percent"] >= MIN_SELECTED)
+        & (candidates_all["form"] >= MIN_FORM)
+        & (candidates_all["points_per_game"] >= MIN_PPG)
+    ]
 
     # Build per-position candidate pools, capped in size for speed
     pos_top = {}
@@ -1283,22 +1343,30 @@ def augment_players_with_xg_xa(players, xg_path: str = "xg_xa_latest.csv"):
     Expects a CSV with at least:
         web_name, team_short, xg, xa, minutes
 
-    If the file is missing or malformed, we fall back gracefully and just
-    return `players` with zeroed xg/xa columns.
+    Behaviour:
+      - If file is missing / empty / malformed => fall back gracefully, keep
+        ga_per90-only model (xGI columns = 0, xg_coverage_flag = 0).
+      - If file has data, compute per90 xG/xA and mark rows where xG data
+        actually exists via xg_coverage_flag = 1.
     """
-    try:
-        xg_df = pd.read_csv(xg_path)
-    except FileNotFoundError:
+    import os
+
+    if not os.path.exists(xg_path):
         print(f"[xG/xA] No file '{xg_path}' found. Proceeding without xG/xA features.")
         players["xg_per90"] = 0.0
         players["xa_per90"] = 0.0
         players["xgi_per90"] = 0.0
+        players["xg_coverage_flag"] = 0
         return players
+
+    try:
+        xg_df = pd.read_csv(xg_path)
     except Exception as e:
         print(f"[xG/xA] Failed to load '{xg_path}': {e}. Proceeding without xG/xA.")
         players["xg_per90"] = 0.0
         players["xa_per90"] = 0.0
         players["xgi_per90"] = 0.0
+        players["xg_coverage_flag"] = 0
         return players
 
     required_cols = {"web_name", "team_short", "xg", "xa", "minutes"}
@@ -1308,18 +1376,26 @@ def augment_players_with_xg_xa(players, xg_path: str = "xg_xa_latest.csv"):
         players["xg_per90"] = 0.0
         players["xa_per90"] = 0.0
         players["xgi_per90"] = 0.0
+        players["xg_coverage_flag"] = 0
+        return players
+
+    if xg_df.empty or (xg_df["minutes"].fillna(0) == 0).all():
+        print(f"[xG/xA] '{xg_path}' is empty or has zero minutes. Using ga_per90 only.")
+        players["xg_per90"] = 0.0
+        players["xa_per90"] = 0.0
+        players["xgi_per90"] = 0.0
+        players["xg_coverage_flag"] = 0
         return players
 
     xg_df = xg_df.copy()
-    # Avoid division by zero
     mins = xg_df["minutes"].replace(0, np.nan)
 
     xg_df["xg_per90"] = (xg_df["xg"] / mins * 90).fillna(0.0)
     xg_df["xa_per90"] = (xg_df["xa"] / mins * 90).fillna(0.0)
     xg_df["xgi_per90"] = xg_df["xg_per90"] + xg_df["xa_per90"]
+    xg_df["xg_coverage_flag"] = 1
 
-    # Only keep columns we need for merge
-    xg_df = xg_df[["web_name", "team_short", "xg_per90", "xa_per90", "xgi_per90"]]
+    xg_df = xg_df[["web_name", "team_short", "xg_per90", "xa_per90", "xgi_per90", "xg_coverage_flag"]]
 
     merged = players.merge(
         xg_df,
@@ -1328,14 +1404,16 @@ def augment_players_with_xg_xa(players, xg_path: str = "xg_xa_latest.csv"):
         suffixes=("", "_xg"),
     )
 
-    # If some players have no xG data, fill with 0
-    for col in ["xg_per90", "xa_per90", "xgi_per90"]:
+    for col in ["xg_per90", "xa_per90", "xgi_per90", "xg_coverage_flag"]:
         if col not in merged.columns:
             merged[col] = 0.0
         else:
             merged[col] = merged[col].fillna(0.0)
 
-    print("[xG/xA] Successfully merged xG/xA features into players.")
+    print(
+        f"[xG/xA] Successfully merged xG/xA features. "
+        f"Coverage: {(merged['xg_coverage_flag'] > 0).mean() * 100:.1f}% of players."
+    )
     return merged
 
 
