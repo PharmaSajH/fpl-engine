@@ -248,53 +248,63 @@ def minutes_factor(row):
 
 def base_ep_from_poisson(row):
     """
-    Expected FPL points for a full match before minutes multiplier.
-    Uses:
-    - g_per90, a_per90 : capped attacking contribution
-    - scoring_factor   : capped fixture attacking intensity
-    - cs_prob          : clean sheet probability (for DEF/GKP)
+    Expected FPL points for a *full match* using:
+      - team attacking λ_for / λ_against
+      - clean sheet probability
+      - player attacking involvement
+
+    Now upgraded to use xG/xA (xgi_per90) when available, with fallback to ga_per90.
     """
     pos = row["position"]
 
-    # Safely get and cap per-90 rates again (defensive programming)
-    g90 = row.get("g_per90", 0.0) or 0.0
-    a90 = row.get("a_per90", 0.0) or 0.0
-    g90 = max(0.0, min(g90, 1.2))
-    a90 = max(0.0, min(a90, 1.2))
+    lam_for = float(row.get("lambda_for", 1.2) or 1.2)
+    lam_against = float(row.get("lambda_against", 1.2) or 1.2)
+    cs_prob = float(row.get("cs_prob", 0.0) or 0.0)
 
-    sf = row.get("scoring_factor", 1.0) or 1.0
-    # Cap fixture intensity so no one gets 3x attacking boost
-    sf = max(0.6, min(sf, 1.4))
+    # Base "involvement" from xG/xA if available; otherwise fall back to GA per 90.
+    xgi90 = float(row.get("xgi_per90", 0.0) or 0.0)
+    ga90 = float(row.get("ga_per90", 0.0) or 0.0)
 
-    cs_p = row.get("cs_prob", 0.0) or 0.0
-    cs_p = max(0.0, min(cs_p, 1.0))
+    # Blend xG/xA with historical GA per 90 (just in case xG feed is sparse)
+    involvement = 0.7 * xgi90 + 0.3 * ga90
 
-    # Goal points by position
-    if pos == "FWD":
-        goal_pts = 4
-    elif pos == "MID":
-        goal_pts = 5
-    elif pos == "DEF":
-        goal_pts = 6
-    elif pos in ("GKP", "GK"):
-        goal_pts = 6
+    # Scaling factors per position (rough, literature-informed priors)
+    if pos in ("FWD",):
+        # Big points from goals and some from assists
+        goal_factor = 4.0   # 4 pts per goal
+        assist_factor = 3.0 # 3 pts per assist
+        base_points = 2.0   # appearance, BPS, etc.
+    elif pos in ("MID",):
+        goal_factor = 5.0
+        assist_factor = 3.0
+        base_points = 2.5
+    elif pos in ("DEF", "GKP", "GK"):
+        goal_factor = 6.0
+        assist_factor = 3.0
+        base_points = 3.0
     else:
-        goal_pts = 5
+        goal_factor = 4.0
+        assist_factor = 3.0
+        base_points = 2.0
 
-    base_app = 2.0  # 60+ mins
+    # Assume approx 60% of xGI is goals, 40% is assists (rough split)
+    expected_goals = involvement * 0.6
+    expected_assists = involvement * 0.4
 
-    attack_ep = sf * (g90 * goal_pts + a90 * 3.0)
+    atk_points = expected_goals * goal_factor + expected_assists * assist_factor
 
-    cs_ep = 0.0
+    # Clean sheet component for DEF/GK and mild for mids
+    cs_points = 0.0
     if pos in ("DEF", "GKP", "GK"):
-        cs_ep = 4.0 * cs_p
+        cs_points = cs_prob * 4.0
+    elif pos == "MID":
+        cs_points = cs_prob * 1.0
 
-    ep = base_app + attack_ep + cs_ep
+    # Small penalty for high λ_against (i.e. leaky team)
+    defence_penalty = max(0.0, (lam_against - 1.2)) * 0.5
 
-    # 🔒 Final safety: no player gets more than ~10 points per full match
-    ep = max(0.0, min(ep, 10.0))
-
-    return ep
+    ep_full_match = base_points + atk_points + cs_points - defence_penalty
+    return max(ep_full_match, 0.0)
 
 def predict_gw_points(players, fixture_df):
     """
@@ -1204,6 +1214,129 @@ def optimise_transfers_milp_multi_horizon(
 
     return squads_by_gw, transfers_df
 
+def generate_email_summary(preds_myteam, preds_all, single_df, double_df, milp_squad):
+    """
+    Build a clean, human-readable summary for the email body.
+    Returns a multi-line string.
+    """
+
+    lines = []
+    lines.append("=== FPL Engine Summary ===\n")
+
+    # ------------------------------------------
+    # 1. Captain suggestion
+    # ------------------------------------------
+    if not preds_myteam.empty:
+        cap_metric = (
+            "multi_gw_points_robust"
+            if "multi_gw_points_robust" in preds_myteam.columns
+            else "multi_gw_points"
+        )
+        best_cap = preds_myteam.sort_values(cap_metric, ascending=False).iloc[0]
+        lines.append(f"⭐ Captain: {best_cap['web_name']} ({best_cap['team_short']})")
+        lines.append(f"   Expected points: {best_cap[cap_metric]:.2f}\n")
+    else:
+        lines.append("⭐ Captain: No data available\n")
+
+    # ------------------------------------------
+    # 2. Single-transfer suggestion
+    # ------------------------------------------
+    if single_df is not None and not single_df.empty:
+        best = single_df.iloc[0]
+        lines.append("🔁 Best Single Transfer:")
+        lines.append(f"   SELL: {best['sell_name']} ({best['sell_team']})")
+        lines.append(f"   BUY:  {best['buy_name']} ({best['buy_team']})")
+        lines.append(f"   Gain: {best['gain']:.2f} pts over horizon\n")
+    else:
+        lines.append("🔁 Best Single Transfer: None found\n")
+
+    # ------------------------------------------
+    # 3. Double-transfer suggestion
+    # ------------------------------------------
+    if double_df is not None and not double_df.empty:
+        best2 = double_df.sort_values("net_gain", ascending=False).iloc[0]
+        lines.append("🔁 Best Double Transfer:")
+        lines.append(f"   Net gain: {best2['net_gain']:.2f} pts")
+        lines.append("   (See CSV for full details)\n")
+    else:
+        lines.append("🔁 Best Double Transfer: None found\n")
+
+    # ------------------------------------------
+    # 4. MILP Full Squad Summary
+    # ------------------------------------------
+    if milp_squad is not None and not milp_squad.empty:
+        metric = milp_squad["selected_metric"].iloc[0]
+        total = milp_squad["total_metric"].iloc[0]
+        price = milp_squad["total_price"].iloc[0]
+        lines.append("🧠 MILP Optimised Squad:")
+        lines.append(f"   Optimises: {metric}")
+        lines.append(f"   Total expected points: {total:.2f}")
+        lines.append(f"   Total price: £{price:.1f}m\n")
+    else:
+        lines.append("🧠 MILP Squad: Not available\n")
+
+    return "\n".join(lines)
+def augment_players_with_xg_xa(players, xg_path: str = "xg_xa_latest.csv"):
+    """
+    Optionally augment the players DataFrame with xG/xA-based features.
+
+    Expects a CSV with at least:
+        web_name, team_short, xg, xa, minutes
+
+    If the file is missing or malformed, we fall back gracefully and just
+    return `players` with zeroed xg/xa columns.
+    """
+    try:
+        xg_df = pd.read_csv(xg_path)
+    except FileNotFoundError:
+        print(f"[xG/xA] No file '{xg_path}' found. Proceeding without xG/xA features.")
+        players["xg_per90"] = 0.0
+        players["xa_per90"] = 0.0
+        players["xgi_per90"] = 0.0
+        return players
+    except Exception as e:
+        print(f"[xG/xA] Failed to load '{xg_path}': {e}. Proceeding without xG/xA.")
+        players["xg_per90"] = 0.0
+        players["xa_per90"] = 0.0
+        players["xgi_per90"] = 0.0
+        return players
+
+    required_cols = {"web_name", "team_short", "xg", "xa", "minutes"}
+    missing = required_cols - set(xg_df.columns)
+    if missing:
+        print(f"[xG/xA] Missing columns in '{xg_path}': {missing}. Proceeding without xG/xA.")
+        players["xg_per90"] = 0.0
+        players["xa_per90"] = 0.0
+        players["xgi_per90"] = 0.0
+        return players
+
+    xg_df = xg_df.copy()
+    # Avoid division by zero
+    mins = xg_df["minutes"].replace(0, np.nan)
+
+    xg_df["xg_per90"] = (xg_df["xg"] / mins * 90).fillna(0.0)
+    xg_df["xa_per90"] = (xg_df["xa"] / mins * 90).fillna(0.0)
+    xg_df["xgi_per90"] = xg_df["xg_per90"] + xg_df["xa_per90"]
+
+    # Only keep columns we need for merge
+    xg_df = xg_df[["web_name", "team_short", "xg_per90", "xa_per90", "xgi_per90"]]
+
+    merged = players.merge(
+        xg_df,
+        on=["web_name", "team_short"],
+        how="left",
+        suffixes=("", "_xg"),
+    )
+
+    # If some players have no xG data, fill with 0
+    for col in ["xg_per90", "xa_per90", "xgi_per90"]:
+        if col not in merged.columns:
+            merged[col] = 0.0
+        else:
+            merged[col] = merged[col].fillna(0.0)
+
+    print("[xG/xA] Successfully merged xG/xA features into players.")
+    return merged
 
 
 def main():
@@ -1215,6 +1348,9 @@ def main():
     data = fetch_bootstrap()
     fixtures = fetch_fixtures()
     players = build_players_df(data)
+    # Optionally augment with xG/xA data if xg_xa_latest.csv is present
+    players = augment_players_with_xg_xa(players)
+
 
     # -------------------------------------------------------
     # 2. Detect CURRENT and NEXT gameweek automatically
