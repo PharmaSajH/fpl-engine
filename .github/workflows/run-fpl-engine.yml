@@ -46,6 +46,11 @@ jobs:
           echo "Understat HTML file size:"
           wc -c data/understat_epl.html
 
+      - name: Debug Understat HTML content
+        run: |
+          echo "First 200 lines of Understat HTML:"
+          head -n 200 data/understat_epl.html
+
       - name: Download FotMob EPL HTML (via jina.ai proxy)
         run: |
           mkdir -p data
@@ -55,6 +60,12 @@ jobs:
             -o data/fotmob_epl.html
           echo "FotMob HTML file size:"
           wc -c data/fotmob_epl.html
+
+      - name: Debug FotMob HTML content
+        run: |
+          echo "First 200 lines of FotMob HTML:"
+          head -n 200 data/fotmob_epl.html
+
 
       - name: Build unified expected stats dataset (Understat + FotMob + FPL API)
         run: |
