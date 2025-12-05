@@ -33,23 +33,28 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
       # -------------------------------------------------------
-      # 4. Fetch Understat + FotMob Data
+      # 4. Fetch Understat + FotMob HTML via proxy (CI-safe)
       # -------------------------------------------------------
 
-      - name: Download Understat EPL HTML (proxy)
+      - name: Download Understat EPL HTML (via jina.ai proxy)
         run: |
           mkdir -p data
           curl -L "https://r.jina.ai/https://understat.com/league/EPL" \
-            -H "User-Agent: Mozilla/5.0" \
+            -H "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)" \
+            -H "Accept-Language: en-US,en;q=0.9" \
             -o data/understat_epl.html
+          echo "Understat HTML file size:"
+          wc -c data/understat_epl.html
 
-      - name: Download FotMob EPL HTML (proxy)
+      - name: Download FotMob EPL HTML (via jina.ai proxy)
         run: |
           mkdir -p data
           curl -L "https://r.jina.ai/https://www.fotmob.com/leagues/47" \
-            -H "User-Agent: Mozilla/5.0" \
+            -H "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)" \
+            -H "Accept-Language: en-US,en;q=0.9" \
             -o data/fotmob_epl.html
-
+          echo "FotMob HTML file size:"
+          wc -c data/fotmob_epl.html
 
       - name: Debug Understat + FotMob downloads
         run: |
