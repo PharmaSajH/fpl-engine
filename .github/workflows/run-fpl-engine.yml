@@ -33,89 +33,155 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
       # -------------------------------------------------------
-      # 4. Fetch and parse FBref Expected Goals (CSV → xg_xa_latest.csv)
+      # 4. Fetch Understat + FotMob Data
       # -------------------------------------------------------
-      - name: Download FBref Expected Goals CSV
+
+      - name: Download Understat EPL player data
         run: |
           mkdir -p data
-          curl -L "https://fbref.com/en/comps/9/expected/Premier-League-Stats.csv" \
+          curl -L "https://understat.com/api/league/players/epl/2024" \
             -H "User-Agent: Mozilla/5.0" \
-            -o data/fbref_expected.csv
+            -o data/understat_players.json
 
-      - name: Download FBref Expected Goals CSV
+      - name: Download FotMob EPL league summary
         run: |
           mkdir -p data
-          curl -L "https://fbref.com/en/comps/9/expected/Premier-League-Stats.csv" \
+          curl -L "https://www.fotmob.com/api/leagues?id=47" \
             -H "User-Agent: Mozilla/5.0" \
-            -o data/fbref_expected.csv
+            -o data/fotmob_league.json
 
-      - name: Convert FBref Expected Goals → xg_xa_latest.csv
+      - name: Build unified expected stats dataset (Understat + FotMob + FPL API)
         run: |
+          python -m pip install --quiet unidecode rapidfuzz
           python - << 'EOF'
-          import pandas as pd
+          import json, pandas as pd, requests
+          from unidecode import unidecode
+          from rapidfuzz import process, fuzz
+          import re
 
-          TEAM_MAP = {
-              "Arsenal": "ARS",
-              "Aston Villa": "AVL",
-              "Bournemouth": "BOU",
-              "Brentford": "BRE",
-              "Brighton": "BHA",
-              "Chelsea": "CHE",
-              "Crystal Palace": "CRY",
-              "Everton": "EVE",
-              "Fulham": "FUL",
-              "Liverpool": "LIV",
-              "Luton Town": "LUT",
-              "Manchester City": "MCI",
-              "Manchester Utd": "MUN",
-              "Newcastle Utd": "NEW",
-              "Nottingham Forest": "NFO",
-              "Sheffield Utd": "SHU",
-              "Tottenham": "TOT",
-              "West Ham": "WHU",
-              "Wolverhampton Wanderers": "WOL",
-          }
+          # -----------------------------
+          # Name Normalization
+          # -----------------------------
+          def normalize(s):
+              if s is None:
+                  return ""
+              s = unidecode(str(s))
+              s = s.lower()
+              s = re.sub(r"[^a-z ]", " ", s)
+              s = " ".join(s.split())
+              return s
 
-          try:
-              df = pd.read_csv("data/fbref_expected.csv")
+          # -----------------------------
+          # 1. Load Understat
+          # -----------------------------
+          with open("data/understat_players.json", "r", encoding="utf-8") as f:
+              udata = json.load(f)
 
-              # Normalize column names
-              df.columns = [c.lower().strip() for c in df.columns]
+          under_rows = []
+          for p in udata["players"]:
+              under_rows.append({
+                  "u_norm": normalize(p["player_name"]),
+                  "u_team": p["team_title"],
+                  "understat_xg": float(p.get("xG", 0)),
+                  "understat_xa": float(p.get("xA", 0)),
+                  "understat_npxg": float(p.get("npxG", 0)),
+                  "understat_minutes": float(p.get("time", 0)),
+              })
+          udf = pd.DataFrame(under_rows)
 
-              out = pd.DataFrame()
-              out["web_name"] = df["player"].astype(str)
-              out["team_short"] = df["squad"].map(TEAM_MAP).fillna(df["squad"])
+          # -----------------------------
+          # 2. Load FotMob
+          # -----------------------------
+          with open("data/fotmob_league.json", "r", encoding="utf-8") as f:
+              fm = json.load(f)
 
-              out["xg"] = pd.to_numeric(df.get("xg", 0), errors="coerce").fillna(0)
-              out["xa"] = pd.to_numeric(df.get("xa", 0), errors="coerce").fillna(0)
-              out["npxg"] = pd.to_numeric(df.get("npxg", 0), errors="coerce").fillna(0)
+          fm_rows = []
+          for team in fm.get("table", {}).get("data", []):
+              tname = team["teamName"]
+              for p in team.get("topPlayers", []):
+                  fm_rows.append({
+                      "f_norm": normalize(p["name"]),
+                      "f_team": tname,
+                      "fotmob_xg": float(p.get("xG", 0)),
+                      "fotmob_xa": float(p.get("xA", 0)),
+                      "fotmob_minutes_recent": float(p.get("min", 0)),
+                      "fotmob_starts_recent": float(p.get("starts", 0)),
+                      "fotmob_role": p.get("position", ""),
+                      "fotmob_availability": p.get("status", ""),
+                  })
+          fdf = pd.DataFrame(fm_rows)
 
-              # FBref sometimes names the combined column differently
-              out["npxg_xa"] = pd.to_numeric(
-                  df.get("npxg+x a", df.get("npxg_xa", df.get("npxg_xa", 0))),
-                  errors="coerce"
-              ).fillna(0)
+          # -----------------------------
+          # 3. Load FPL API Live
+          # -----------------------------
+          fpl = requests.get("https://fantasy.premierleague.com/api/bootstrap-static/").json()
+          players = fpl["elements"]
+          teams = {t["id"]: t["short_name"] for t in fpl["teams"]}
 
-              out["minutes"] = pd.to_numeric(df.get("minutes", 0), errors="coerce").fillna(0)
+          fpl_rows = []
+          for p in players:
+              fpl_rows.append({
+                  "web_name": p["web_name"],
+                  "team_short": teams[p["team"]],
+                  "norm": normalize(p["web_name"])
+              })
 
-              out.to_csv("xg_xa_latest.csv", index=False)
-              print("SUCCESS: Wrote", len(out), "rows to xg_xa_latest.csv")
+          fpldf = pd.DataFrame(fpl_rows)
 
-          except Exception as e:
-              print("FBref Expected Goals parse FAILED:", e)
-              pd.DataFrame(
-                  {
-                      "web_name": [],
-                      "team_short": [],
-                      "xg": [],
-                      "xa": [],
-                      "npxg": [],
-                      "npxg_xa": [],
-                      "minutes": []
-                  }
-              ).to_csv("xg_xa_latest.csv", index=False)
-              print("Empty fallback CSV written.")
+          # -----------------------------
+          # 4. Hybrid Matching
+          # -----------------------------
+          out_rows = []
 
+          for _, row in fpldf.iterrows():
+              n = row["norm"]
+
+              # --- Understat simple
+              u = udf[udf["u_norm"] == n]
+
+              # --- FotMob simple
+              f = fdf[fdf["f_norm"] == n]
+
+              # --- Understat fuzzy
+              if u.empty:
+                  try:
+                      match, score, _ = process.extractOne(n, udf["u_norm"], scorer=fuzz.token_sort_ratio)
+                      if score >= 90:
+                          u = udf[udf["u_norm"] == match]
+                  except:
+                      pass
+
+              # --- FotMob fuzzy
+              if f.empty:
+                  try:
+                      match, score, _ = process.extractOne(n, fdf["f_norm"], scorer=fuzz.token_sort_ratio)
+                      if score >= 90:
+                          f = fdf[fdf["f_norm"] == match]
+                  except:
+                      pass
+
+              out_rows.append({
+                  "web_name": row["web_name"],
+                  "team_short": row["team_short"],
+
+                  # Understat
+                  "understat_xg": u.get("understat_xg", pd.Series([0])).iloc[0],
+                  "understat_xa": u.get("understat_xa", pd.Series([0])).iloc[0],
+                  "understat_npxg": u.get("understat_npxg", pd.Series([0])).iloc[0],
+                  "understat_minutes": u.get("understat_minutes", pd.Series([0])).iloc[0],
+
+                  # FotMob
+                  "fotmob_xg": f.get("fotmob_xg", pd.Series([0])).iloc[0],
+                  "fotmob_xa": f.get("fotmob_xa", pd.Series([0])).iloc[0],
+                  "fotmob_minutes_recent": f.get("fotmob_minutes_recent", pd.Series([0])).iloc[0],
+                  "fotmob_starts_recent": f.get("fotmob_starts_recent", pd.Series([0])).iloc[0],
+                  "fotmob_role": f.get("fotmob_role", pd.Series([""])).iloc[0],
+                  "fotmob_availability": f.get("fotmob_availability", pd.Series([""])).iloc[0],
+              })
+
+          outdf = pd.DataFrame(out_rows)
+          outdf.to_csv("expected_stats_latest.csv", index=False)
+          print("Created expected_stats_latest.csv with", len(outdf), "rows")
           EOF
 
       # -------------------------------------------------------
