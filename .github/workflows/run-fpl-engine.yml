@@ -32,167 +32,124 @@ jobs:
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      # -------------------------------------------------------
-      # 4. Fetch Understat + FotMob HTML via proxy (CI-safe)
-      # -------------------------------------------------------
-
-      - name: Download Understat EPL HTML (via jina.ai proxy)
+      - name: Download FotMob EPL player stats (JSON API)
         run: |
           mkdir -p data
-          curl -L "https://r.jina.ai/https://understat.com/league/EPL" \
-            -H "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)" \
-            -H "Accept-Language: en-US,en;q=0.9" \
-            -o data/understat_epl.html
-          echo "Understat HTML file size:"
-          wc -c data/understat_epl.html
+          curl -L "https://www.fotmob.com/api/leagues?id=47&tab=players" \
+            -H "User-Agent: Mozilla/5.0" \
+            -H "Accept: application/json" \
+            -o data/fotmob_players.json
+          echo "FotMob JSON file size:"
+          wc -c data/fotmob_players.json
 
-      - name: Debug Understat HTML content
-        run: |
-          echo "First 200 lines of Understat HTML:"
-          head -n 200 data/understat_epl.html
-
-      - name: Download FotMob EPL HTML (via jina.ai proxy)
-        run: |
-          mkdir -p data
-          curl -L "https://r.jina.ai/https://www.fotmob.com/leagues/47" \
-            -H "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)" \
-            -H "Accept-Language: en-US,en;q=0.9" \
-            -o data/fotmob_epl.html
-          echo "FotMob HTML file size:"
-          wc -c data/fotmob_epl.html
-
-      - name: Debug FotMob HTML content
-        run: |
-          echo "First 200 lines of FotMob HTML:"
-          head -n 200 data/fotmob_epl.html
-
-
-      - name: Build unified expected stats dataset (Understat + FotMob + FPL API)
+      - name: Build expected stats dataset (FotMob-only + FPL API)
         run: |
           python -m pip install --quiet unidecode rapidfuzz
           python - << 'EOF'
-          import re, json, pandas as pd, requests
+          import json, pandas as pd, requests
           from unidecode import unidecode
-          from rapidfuzz import process, fuzz
+          from rapidfuzz import fuzz, process
 
-          # --------------------------------------------------------
+          # -----------------------------
           # Utility: normalize names
-          # --------------------------------------------------------
-          def normalize(s):
-              import re
+          # -----------------------------
+          def norm(s):
               if not s: return ""
+              import re
               s = unidecode(str(s)).lower()
               s = re.sub(r"[^a-z ]", " ", s)
               return " ".join(s.split())
 
-          # --------------------------------------------------------
-          # 1. Load Understat HTML & extract playersData
-          # --------------------------------------------------------
-          under_html = open("data/understat_epl.html", "r", encoding="utf-8").read()
+          # -----------------------------
+          # 1. Load FotMob JSON
+          # -----------------------------
+          with open("data/fotmob_players.json", "r", encoding="utf-8") as f:
+              fm = json.load(f)
 
-          # Match: var playersData = JSON.parse('...'); 
-          m = re.search(r"playersData\s*=\s*JSON\.parse\('(.+?)'\)", under_html, re.DOTALL)
-          if not m:
-              raise RuntimeError("Could not extract Understat playersData JSON")
+          # FotMob players are inside fm["players"]
+          fm_players_raw = fm.get("players", [])
 
-          raw_json = m.group(1).encode('utf-8').decode('unicode_escape')
-          under_data = json.loads(raw_json)
-
-          # Convert Understat data → DataFrame
-          under_rows = []
-          for p in under_data:
-              under_rows.append({
-                  "u_norm": normalize(p["player_name"]),
-                  "u_team": p["team_title"],
-                  "understat_xg": float(p.get("xG", 0)),
-                  "understat_xa": float(p.get("xA", 0)),
-                  "understat_npxg": float(p.get("npxG", 0)),
-                  "understat_minutes": float(p.get("time", 0)),
-              })
-          udf = pd.DataFrame(under_rows)
-
-          # --------------------------------------------------------
-          # 2. Load FotMob HTML & extract __INITIAL_STATE__
-          # --------------------------------------------------------
-          fot_html = open("data/fotmob_epl.html", "r", encoding="utf-8").read()
-
-          m2 = re.search(r"__INITIAL_STATE__\s*=\s*(\{.*?\})</script>", fot_html, re.DOTALL)
-          if not m2:
-              raise RuntimeError("Could not extract FotMob INITIAL_STATE JSON")
-
-          fot_data = json.loads(m2.group(1))
-
-          # FotMob table
           fm_rows = []
-          for team in fot_data.get("league", {}).get("teams", []):
-              for p in team.get("topPlayers", []):
-                  fm_rows.append({
-                      "f_norm": normalize(p["name"]),
-                      "f_team": team["name"],
-                      "fotmob_xg": float(p.get("xG", 0)),
-                      "fotmob_xa": float(p.get("xA", 0)),
-                      "fotmob_minutes_recent": float(p.get("min", 0)),
-                      "fotmob_starts_recent": float(p.get("starts", 0)),
-                      "fotmob_role": p.get("position", ""),
-                      "fotmob_availability": p.get("status", ""),
-                  })
+          for p in fm_players_raw:
+              fm_rows.append({
+                  "f_norm": norm(p.get("name")),
+                  "fotmob_name": p.get("name"),
+                  "fotmob_team": p.get("teamName"),
+                  "fotmob_xg": float(p.get("xG", 0)),
+                  "fotmob_xa": float(p.get("xA", 0)),
+                  "fotmob_shots": float(p.get("shots", 0)),
+                  "fotmob_keypasses": float(p.get("keyPasses", 0)),
+                  "fotmob_minutes": float(p.get("minsPlayed", 0)),
+                  "fotmob_role": p.get("position"),
+                  "fotmob_status": p.get("injuryStatus") or "",
+              })
+
           fdf = pd.DataFrame(fm_rows)
 
-          # --------------------------------------------------------
-          # 3. Load FPL API Live
-          # --------------------------------------------------------
-          fpl = requests.get("https://fantasy.premierleague.com/api/bootstrap-static/").json()
-          teams = {t["id"]: t["short_name"] for t in fpl["teams"]}
+          # -----------------------------
+          # 2. Load FPL API
+          # -----------------------------
+          bootstrap = requests.get(
+              "https://fantasy.premierleague.com/api/bootstrap-static/"
+          ).json()
+
+          teams = {t["id"]: t["short_name"] for t in bootstrap["teams"]}
 
           fpl_rows = []
-          for p in fpl["elements"]:
+          for p in bootstrap["elements"]:
               fpl_rows.append({
                   "web_name": p["web_name"],
                   "team_short": teams[p["team"]],
-                  "norm": normalize(p["web_name"]),
+                  "norm": norm(p["web_name"]),
               })
+
           fpldf = pd.DataFrame(fpl_rows)
 
-          # --------------------------------------------------------
-          # 4. Hybrid Matching
-          # --------------------------------------------------------
-          out_rows = []
+          # -----------------------------
+          # 3. Hybrid Matching (simple + fuzzy fallback)
+          # -----------------------------
+          out = []
 
           for _, row in fpldf.iterrows():
               n = row["norm"]
 
-              # Understat
-              u = udf[udf["u_norm"] == n]
-              if u.empty:
-                  match = process.extractOne(n, udf["u_norm"], scorer=fuzz.token_sort_ratio)
-                  if match and match[1] >= 90:
-                      u = udf[udf["u_norm"] == match[0]]
+              # Simple match
+              m = fdf[fdf["f_norm"] == n]
 
-              # FotMob
-              f = fdf[fdf["f_norm"] == n]
-              if f.empty:
+              # Fuzzy match fallback
+              if m.empty:
                   match = process.extractOne(n, fdf["f_norm"], scorer=fuzz.token_sort_ratio)
                   if match and match[1] >= 90:
-                      f = fdf[fdf["f_norm"] == match[0]]
+                      m = fdf[fdf["f_norm"] == match[0]]
 
-              out_rows.append({
-                  "web_name": row["web_name"],
-                  "team_short": row["team_short"],
+              # Build output row
+              if not m.empty:
+                  mr = m.iloc[0]
+                  out.append({
+                      "web_name": row["web_name"],
+                      "team_short": row["team_short"],
+                      "xg": mr["fotmob_xg"],
+                      "xa": mr["fotmob_xa"],
+                      "shots": mr["fotmob_shots"],
+                      "keypasses": mr["fotmob_keypasses"],
+                      "minutes": mr["fotmob_minutes"],
+                      "role": mr["fotmob_role"],
+                      "status": mr["fotmob_status"],
+                  })
+              else:
+                  out.append({
+                      "web_name": row["web_name"],
+                      "team_short": row["team_short"],
+                      "xg": 0,
+                      "xa": 0,
+                      "shots": 0,
+                      "keypasses": 0,
+                      "minutes": 0,
+                      "role": "",
+                      "status": "",
+                  })
 
-                  "understat_xg": u["understat_xg"].iloc[0] if not u.empty else 0,
-                  "understat_xa": u["understat_xa"].iloc[0] if not u.empty else 0,
-                  "understat_npxg": u["understat_npxg"].iloc[0] if not u.empty else 0,
-                  "understat_minutes": u["understat_minutes"].iloc[0] if not u.empty else 0,
-
-                  "fotmob_xg": f["fotmob_xg"].iloc[0] if not f.empty else 0,
-                  "fotmob_xa": f["fotmob_xa"].iloc[0] if not f.empty else 0,
-                  "fotmob_minutes_recent": f["fotmob_minutes_recent"].iloc[0] if not f.empty else 0,
-                  "fotmob_starts_recent": f["fotmob_starts_recent"].iloc[0] if not f.empty else 0,
-                  "fotmob_role": f["fotmob_role"].iloc[0] if not f.empty else "",
-                  "fotmob_availability": f["fotmob_availability"].iloc[0] if not f.empty else "",
-              })
-
-          outdf = pd.DataFrame(out_rows)
+          outdf = pd.DataFrame(out)
           outdf.to_csv("expected_stats_latest.csv", index=False)
           print("Created expected_stats_latest.csv with", len(outdf), "rows")
           EOF
