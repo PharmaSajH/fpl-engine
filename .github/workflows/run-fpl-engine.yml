@@ -1,7 +1,10 @@
 name: Run FPL Engine
 
 on:
+  # Manual trigger from the GitHub UI
   workflow_dispatch:
+
+  # Scheduled run: every Friday at 08:00 UK time
   schedule:
     - cron: "0 8 * * FRI"
 
@@ -10,170 +13,125 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    # -------------------------------------------------------
-    # 1. Checkout repo
-    # -------------------------------------------------------
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      # ---------------------------------------------
+      # 1. Check out repo
+      # ---------------------------------------------
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    # -------------------------------------------------------
-    # 2. Set up Python
-    # -------------------------------------------------------
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: "3.11"
+      # ---------------------------------------------
+      # 2. Set up Python
+      # ---------------------------------------------
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-    # -------------------------------------------------------
-    # 3. Install dependencies
-    # -------------------------------------------------------
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+      # ---------------------------------------------
+      # 3. Install dependencies
+      # ---------------------------------------------
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-    # -------------------------------------------------------
-    # 4. Fetch FBref xG/xA
-    # -------------------------------------------------------
-    - name: Download FBref xG/xA data
-      run: |
-        mkdir -p data
-        curl -L "https://fbref.com/en/comps/9/xg/Premier-League-Stats.csv" -o data/fbref_xg.csv
+      # ---------------------------------------------------
+      # 4. Fetch xG/xA data from FBref
+      # ---------------------------------------------------
+      - name: Download FBref xG/xA data
+        run: |
+          mkdir -p data
+          curl -L "https://fbref.com/en/comps/9/xg/Premier-League-Stats.csv" -o data/fbref_xg.csv
 
-    - name: Convert FBref → xg_xa_latest.csv
-      run: |
-        python - << 'EOF'
-        import pandas as pd
-        try:
-            df = pd.read_csv("data/fbref_xg.csv")
-            df.columns = [c.lower().strip() for c in df.columns]
+      # ---------------------------------------------------
+      # 5. Convert xG/xA CSV into engine_xg_xa_latest.csv
+      # ---------------------------------------------------
+      - name: Convert FBref xG data to xg_xa_latest.csv
+        run: |
+          python - << 'EOF'
+          import pandas as pd
 
-            required = ["player", "squad", "xg", "xa", "minutes"]
-            for c in required:
-                if c not in df.columns:
-                    raise Exception("Missing column: " + c)
+          try:
+              df = pd.read_csv("data/fbref_xg.csv")
+              df.columns = [c.lower().strip() for c in df.columns]
 
-            out = pd.DataFrame()
-            out["web_name"] = df["player"]
-            out["team_short"] = df["squad"]
-            out["xg"] = df["xg"].fillna(0)
-            out["xa"] = df["xa"].fillna(0)
-            out["minutes"] = df["minutes"].fillna(0)
+              required = ["player", "squad", "xg", "xa", "minutes"]
+              missing = [c for c in required if c not in df.columns]
+              if missing:
+                  print("FBref CSV missing:", missing)
+                  df = pd.DataFrame(columns=required)
 
-            out.to_csv("xg_xa_latest.csv", index=False)
-            print("Created xg_xa_latest.csv")
-        except Exception as e:
-            print("Could not parse xG data:", e)
-            pd.DataFrame({"web_name": [],"team_short": [],"xg": [],"xa": [],"minutes": []}).to_csv("xg_xa_latest.csv", index=False)
-        EOF
+              out = pd.DataFrame()
+              out["web_name"] = df["player"]
+              out["team_short"] = df["squad"]
+              out["xg"] = df["xg"].fillna(0)
+              out["xa"] = df["xa"].fillna(0)
+              out["minutes"] = df["minutes"].fillna(0)
 
-    # -------------------------------------------------------
-    # 5. Run engine
-    # -------------------------------------------------------
-    - name: Run FPL engine
-      run: python engine_gw13.py
+              out.to_csv("xg_xa_latest.csv", index=False)
+              print("Created xg_xa_latest.csv with", len(out), "rows.")
+          except Exception as e:
+              print("Failed to convert FBref xG data:", e)
+              pd.DataFrame(columns=["web_name","team_short","xg","xa","minutes"]).to_csv("xg_xa_latest.csv", index=False)
+              print("Created empty xg_xa_latest.csv instead.")
+          EOF
 
-    # -------------------------------------------------------
-    # 6. Generate plain-text summary for email
-    # -------------------------------------------------------
-    - name: Build email summary
-      id: summary
-      run: |
-        echo "Creating email summary..."
+      # ---------------------------------------------------
+      # 6. Run the engine
+      # ---------------------------------------------------
+      - name: Run FPL engine
+        run: |
+          python engine_gw13.py
 
-        # Default text in case files missing
-        SUMMARY="FPL Engine Summary\n\n"
+      # ---------------------------------------------------
+      # 7. Zip the CSV outputs
+      # ---------------------------------------------------
+      - name: Zip outputs
+        run: |
+          mkdir -p artifacts
+          if ls *.csv 1> /dev/null 2>&1; then
+            zip artifacts/fpl-engine-csvs.zip *.csv
+          else
+            echo "No CSVs found—creating empty zip."
+            zip artifacts/fpl-engine-csvs.zip /dev/null
+          fi
 
-        # Captain
-        if [ -f gw*myteam.csv ]; then
-          CAPTAIN=$(python - << 'EOF'
-import pandas as pd, glob
-df = pd.read_csv(glob.glob("gw*_myteam.csv")[0])
-df = df.sort_values("multi_gw_points", ascending=False)
-top = df.iloc[0]
-print(f"Suggested Captain: {top.web_name} ({top.team_short}) — {top.multi_gw_points:.2f} pts")
-EOF
-)
-          SUMMARY="$SUMMARY$CAPTAIN\n\n"
-        fi
+      # ---------------------------------------------------
+      # 8. Upload ZIP as GitHub Artifact
+      # ---------------------------------------------------
+      - name: Upload CSV outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: fpl-engine-csvs
+          path: artifacts/fpl-engine-csvs.zip
 
-        # Single Transfer
-        if [ -f gw*_transfer_suggestions.csv ]; then
-          SINGLE=$(python - << 'EOF'
-import pandas as pd, glob
-df = pd.read_csv(glob.glob("gw*_transfer_suggestions.csv")[0])
-top = df.iloc[0]
-print(f"Top Single Transfer:\nSell {top.sell_name} → Buy {top.buy_name} (Gain: {top.gain:.2f})")
-EOF
-)
-          SUMMARY="$SUMMARY$SINGLE\n\n"
-        fi
+      # ---------------------------------------------------
+      # 9. Email results via Gmail (STARTTLS)
+      # ---------------------------------------------------
+      - name: Email results
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 587
+          secure: starttls
 
-        # Double Transfer
-        if [ -f gw*_double_transfers.csv ]; then
-          DOUBLE=$(python - << 'EOF'
-import pandas as pd, glob
-df = pd.read_csv(glob.glob("gw*_double_transfers.csv")[0])
-top = df.iloc[0]
-print(f"Top Double Transfer:\nSell {top.sell1} & {top.sell2} → Buy {top.buy1} & {top.buy2} (Net Gain: {top.net_gain:.2f})")
-EOF
-)
-          SUMMARY="$SUMMARY$DOUBLE\n\n"
-        fi
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
 
-        echo "$SUMMARY" > summary.txt
-        echo "summary_out<<EOF" >> $GITHUB_OUTPUT
-        echo "$SUMMARY"       >> $GITHUB_OUTPUT
-        echo "EOF"            >> $GITHUB_OUTPUT
+          from: ${{ secrets.EMAIL_FROM }}
+          to: ${{ secrets.EMAIL_TO }}
 
-    # -------------------------------------------------------
-    # 7. ZIP CSV outputs
-    # -------------------------------------------------------
-    - name: Zip outputs
-      run: |
-        mkdir -p artifacts
-        zip artifacts/fpl-engine-csvs.zip *.csv
+          subject: "FPL Engine Results (Run #${{ github.run_number }})"
+          body: |
+            Your automated FPL prediction + optimisation engine has completed successfully.
 
-    # -------------------------------------------------------
-    # 8. Upload artifacts
-    # -------------------------------------------------------
-    - name: Upload CSV artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: fpl-engine-csvs
-        path: artifacts/fpl-engine-csvs.zip
+            ✔ GitHub Run ID: ${{ github.run_id }}
+            ✔ Repo: ${{ github.repository }}
+            ✔ CSV outputs attached
 
-    # -------------------------------------------------------
-    # 9. Email results (with summary included)
-    # -------------------------------------------------------
-    - name: Email results
-      uses: dawidd6/action-send-mail@v3
-      with:
-        server_address: smtp.gmail.com
-        server_port: 587
-        secure: starttls
+            Full run log:
+            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
-        username: ${{ secrets.SMTP_USERNAME }}
-        password: ${{ secrets.SMTP_PASSWORD }}
+            (Summaries inside email coming soon.)
 
-        from: ${{ secrets.EMAIL_FROM }}
-        to: ${{ secrets.EMAIL_TO }}
-
-        subject: "FPL Engine Results (Run #${{ github.run_number }})"
-
-        body: |
-          Your FPL engine run has completed.
-
-          =============================
-          FPL SUMMARY
-          =============================
-
-          ${{ steps.summary.outputs.summary_out }}
-
-          -----------------------------
-          Full run details:
-          ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-
-          CSV outputs are attached.
-
-        attachments: artifacts/fpl-engine-csvs.zip
+          attachments: artifacts/fpl-engine-csvs.zip
