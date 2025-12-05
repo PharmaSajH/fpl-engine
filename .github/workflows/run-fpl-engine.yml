@@ -36,19 +36,19 @@ jobs:
       # 4. Fetch Understat + FotMob Data
       # -------------------------------------------------------
 
-      - name: Download Understat EPL player data
+      - name: Download Understat EPL HTML (proxy)
         run: |
           mkdir -p data
-          curl -L "https://r.jina.ai/https://understat.com/api/league/players/epl/2024" \
+          curl -L "https://r.jina.ai/https://understat.com/league/EPL" \
             -H "User-Agent: Mozilla/5.0" \
-            -o data/understat_players.json
+            -o data/understat_epl.html
 
-      - name: Download FotMob EPL league summary
+      - name: Download FotMob EPL HTML (proxy)
         run: |
           mkdir -p data
-          curl -L "https://r.jina.ai/https://www.fotmob.com/api/allPlayers?league=47" \
+          curl -L "https://r.jina.ai/https://www.fotmob.com/leagues/47" \
             -H "User-Agent: Mozilla/5.0" \
-            -o data/fotmob_league.json
+            -o data/fotmob_epl.html
 
 
       - name: Debug Understat + FotMob downloads
