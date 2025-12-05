@@ -1336,86 +1336,136 @@ def generate_email_summary(preds_myteam, preds_all, single_df, double_df, milp_s
         lines.append("🧠 MILP Squad: Not available\n")
 
     return "\n".join(lines)
-def augment_players_with_xg_xa(players, xg_path: str = "xg_xa_latest.csv"):
+
+def augment_players_with_expected_stats(
+    players: pd.DataFrame,
+    stats_path: str = "expected_stats_latest.csv",
+):
     """
-    Optionally augment the players DataFrame with xG/xA-based features.
+    Optionally augment the players DataFrame with external expected-stats features
+    (Understat + FotMob merged).
 
     Expects a CSV with at least:
-        web_name, team_short, xg, xa, minutes
+        web_name, team_short,
+        understat_xg, understat_xa, understat_npxg, understat_minutes,
+        fotmob_xg, fotmob_xa, fotmob_minutes_recent, fotmob_starts_recent,
+        fotmob_role, fotmob_availability
 
-    Behaviour:
-      - If file is missing / empty / malformed => fall back gracefully, keep
-        ga_per90-only model (xGI columns = 0, xg_coverage_flag = 0).
-      - If file has data, compute per90 xG/xA and mark rows where xG data
-        actually exists via xg_coverage_flag = 1.
+    If the file is missing or malformed, we fall back gracefully and return
+    `players` with zeroed xg/xa/xgi columns and xg_coverage_flag = 0.
     """
-    import os
-
-    if not os.path.exists(xg_path):
-        print(f"[xG/xA] No file '{xg_path}' found. Proceeding without xG/xA features.")
-        players["xg_per90"] = 0.0
-        players["xa_per90"] = 0.0
-        players["xgi_per90"] = 0.0
-        players["xg_coverage_flag"] = 0
-        return players
-
     try:
-        xg_df = pd.read_csv(xg_path)
+        stats = pd.read_csv(stats_path)
+    except FileNotFoundError:
+        print(f"[expected_stats] No file '{stats_path}' found. Proceeding without enrichment.")
+        players["xg_per90"] = 0.0
+        players["xa_per90"] = 0.0
+        players["xgi_per90"] = 0.0
+        players["xg_coverage_flag"] = 0.0
+        return players
     except Exception as e:
-        print(f"[xG/xA] Failed to load '{xg_path}': {e}. Proceeding without xG/xA.")
+        print(f"[expected_stats] Failed to read '{stats_path}': {e}")
         players["xg_per90"] = 0.0
         players["xa_per90"] = 0.0
         players["xgi_per90"] = 0.0
-        players["xg_coverage_flag"] = 0
+        players["xg_coverage_flag"] = 0.0
         return players
 
-    required_cols = {"web_name", "team_short", "xg", "xa", "minutes"}
-    missing = required_cols - set(xg_df.columns)
-    if missing:
-        print(f"[xG/xA] Missing columns in '{xg_path}': {missing}. Proceeding without xG/xA.")
-        players["xg_per90"] = 0.0
-        players["xa_per90"] = 0.0
-        players["xgi_per90"] = 0.0
-        players["xg_coverage_flag"] = 0
-        return players
+    # Normalise expected-stats columns
+    for col in [
+        "understat_xg",
+        "understat_xa",
+        "understat_npxg",
+        "understat_minutes",
+        "fotmob_xg",
+        "fotmob_xa",
+        "fotmob_minutes_recent",
+        "fotmob_starts_recent",
+    ]:
+        if col in stats.columns:
+            stats[col] = pd.to_numeric(stats[col], errors="coerce").fillna(0.0)
+        else:
+            stats[col] = 0.0
 
-    if xg_df.empty or (xg_df["minutes"].fillna(0) == 0).all():
-        print(f"[xG/xA] '{xg_path}' is empty or has zero minutes. Using ga_per90 only.")
-        players["xg_per90"] = 0.0
-        players["xa_per90"] = 0.0
-        players["xgi_per90"] = 0.0
-        players["xg_coverage_flag"] = 0
-        return players
+    # Basic sanity: keep only needed columns
+    keep_cols = [
+        "web_name",
+        "team_short",
+        "understat_xg",
+        "understat_xa",
+        "understat_npxg",
+        "understat_minutes",
+        "fotmob_xg",
+        "fotmob_xa",
+        "fotmob_minutes_recent",
+        "fotmob_starts_recent",
+        "fotmob_role",
+        "fotmob_availability",
+    ]
+    stats = stats[[c for c in keep_cols if c in stats.columns]]
 
-    xg_df = xg_df.copy()
-    mins = xg_df["minutes"].replace(0, np.nan)
+    # Compute a blended xG/xA and minutes
+    def compute_rates(row):
+        u_min = float(row.get("understat_minutes", 0.0))
+        f_min_recent = float(row.get("fotmob_minutes_recent", 0.0))
 
-    xg_df["xg_per90"] = (xg_df["xg"] / mins * 90).fillna(0.0)
-    xg_df["xa_per90"] = (xg_df["xa"] / mins * 90).fillna(0.0)
-    xg_df["xgi_per90"] = xg_df["xg_per90"] + xg_df["xa_per90"]
-    xg_df["xg_coverage_flag"] = 1
+        # Approximate "true" minutes: use Understat season minutes,
+        # but don't ignore recent FotMob data if Understat is low.
+        minutes = u_min
+        if f_min_recent > 0:
+            minutes = max(minutes, f_min_recent * 3.0)  # assume last ~3 matches window
 
-    xg_df = xg_df[["web_name", "team_short", "xg_per90", "xa_per90", "xgi_per90", "xg_coverage_flag"]]
+        minutes = max(minutes, 90.0)  # avoid crazy per-90 inflation
+
+        u_xg = float(row.get("understat_xg", 0.0))
+        u_xa = float(row.get("understat_xa", 0.0))
+        f_xg = float(row.get("fotmob_xg", 0.0))
+        f_xa = float(row.get("fotmob_xa", 0.0))
+
+        # Blend Understat (season) and FotMob (recent)
+        xg_total = 0.7 * u_xg + 0.3 * f_xg
+        xa_total = 0.7 * u_xa + 0.3 * f_xa
+
+        xg_per90 = xg_total / (minutes / 90.0) if minutes > 0 else 0.0
+        xa_per90 = xa_total / (minutes / 90.0) if minutes > 0 else 0.0
+        xgi_per90 = xg_per90 + xa_per90
+
+        # Coverage flag: 1 if we have meaningful minutes + xG/xA signal
+        coverage = 1.0 if (minutes >= 90.0 and (xg_total > 0 or xa_total > 0)) else 0.0
+
+        return pd.Series(
+            {
+                "xg_per90": xg_per90,
+                "xa_per90": xa_per90,
+                "xgi_per90": xgi_per90,
+                "xg_coverage_flag": coverage,
+            }
+        )
+
+    rates = stats.apply(compute_rates, axis=1)
+    stats = pd.concat([stats[["web_name", "team_short"]], rates], axis=1)
 
     merged = players.merge(
-        xg_df,
+        stats,
         on=["web_name", "team_short"],
         how="left",
-        suffixes=("", "_xg"),
+        suffixes=("", "_exp"),
     )
 
-    for col in ["xg_per90", "xa_per90", "xgi_per90", "xg_coverage_flag"]:
+    # Fill missing with 0 / 0.0
+    for col, default in [
+        ("xg_per90", 0.0),
+        ("xa_per90", 0.0),
+        ("xgi_per90", 0.0),
+        ("xg_coverage_flag", 0.0),
+    ]:
         if col not in merged.columns:
-            merged[col] = 0.0
+            merged[col] = default
         else:
-            merged[col] = merged[col].fillna(0.0)
+            merged[col] = pd.to_numeric(merged[col], errors="coerce").fillna(default)
 
-    print(
-        f"[xG/xA] Successfully merged xG/xA features. "
-        f"Coverage: {(merged['xg_coverage_flag'] > 0).mean() * 100:.1f}% of players."
-    )
+    print("[expected_stats] Successfully merged expected-stats features into players.")
     return merged
-
 
 def main():
     print("=== FPL Prediction + Optimisation Engine (Auto-Mode) ===")
@@ -1427,8 +1477,7 @@ def main():
     fixtures = fetch_fixtures()
     players = build_players_df(data)
     # Optionally augment with xG/xA data if xg_xa_latest.csv is present
-    players = augment_players_with_xg_xa(players)
-
+    players = augment_players_with_expected_stats(players, stats_path="expected_stats_latest.csv")
 
     # -------------------------------------------------------
     # 2. Detect CURRENT and NEXT gameweek automatically
