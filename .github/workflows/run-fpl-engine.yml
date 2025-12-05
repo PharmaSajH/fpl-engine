@@ -33,24 +33,20 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
       # -------------------------------------------------------
-      # 4. Fetch and parse FBref xG/xA (robust HTML → CSV)
+      # 4. Fetch and parse FBref Expected Goals (CSV → xg_xa_latest.csv)
       # -------------------------------------------------------
-      - name: Download FBref HTML
+      - name: Download FBref Expected Goals CSV
         run: |
           mkdir -p data
-          curl -L "https://fbref.com/en/comps/9/Premier-League-Stats" \
+          curl -L "https://fbref.com/en/comps/9/expected/Premier-League-Stats.csv" \
             -H "User-Agent: Mozilla/5.0" \
-            -o data/fbref.html
+            -o data/fbref_expected.csv
 
-      - name: Extract xG/xA from FBref HTML (BeautifulSoup)
+      - name: Convert FBref Expected Goals → xg_xa_latest.csv
         run: |
-          python -m pip install --quiet beautifulsoup4 lxml
           python - << 'EOF'
           import pandas as pd
-          import numpy as np
-          from bs4 import BeautifulSoup, Comment
 
-          # Map FBref team names -> FPL team_short
           TEAM_MAP = {
               "Arsenal": "ARS",
               "Aston Villa": "AVL",
@@ -73,119 +69,46 @@ jobs:
               "Wolverhampton Wanderers": "WOL",
           }
 
-          def parse_number(s):
-              s = (s or "").strip()
-              if s in ("", "-", "NA"):
-                  return 0.0
-              try:
-                  return float(s)
-              except Exception:
-                  return 0.0
-
           try:
-              # Read saved HTML
-              with open("data/fbref.html", encoding="utf-8") as f:
-                  html = f.read()
+              df = pd.read_csv("data/fbref_expected.csv")
 
-              soup = BeautifulSoup(html, "lxml")
+              # Normalize column names
+              df.columns = [c.lower().strip() for c in df.columns]
 
-              # FBref often hides tables in HTML comments, so parse both normal and commented tables
-              tables = []
+              out = pd.DataFrame()
+              out["web_name"] = df["player"].astype(str)
+              out["team_short"] = df["squad"].map(TEAM_MAP).fillna(df["squad"])
 
-              # Visible tables
-              tables.extend(soup.find_all("table"))
+              out["xg"] = pd.to_numeric(df.get("xg", 0), errors="coerce").fillna(0)
+              out["xa"] = pd.to_numeric(df.get("xa", 0), errors="coerce").fillna(0)
+              out["npxg"] = pd.to_numeric(df.get("npxg", 0), errors="coerce").fillna(0)
 
-              # Tables inside comments
-              for comment in soup.find_all(string=lambda text: isinstance(text, Comment)):
-                  if "<table" in comment:
-                      frag = BeautifulSoup(comment, "lxml")
-                      tables.extend(frag.find_all("table"))
+              # FBref sometimes names the combined column differently
+              out["npxg_xa"] = pd.to_numeric(
+                  df.get("npxg+x a", df.get("npxg_xa", df.get("npxg_xa", 0))),
+                  errors="coerce"
+              ).fillna(0)
 
-              print(f"[DEBUG] Found {len(tables)} total <table> elements (visible + commented).")
+              out["minutes"] = pd.to_numeric(df.get("minutes", 0), errors="coerce").fillna(0)
 
-              target_table = None
-
-              # Heuristic: find table with expected stats: data-stat fields xg/xa/npxg etc.
-              for idx, table in enumerate(tables):
-                  header_th = table.find("thead")
-                  if not header_th:
-                      continue
-                  header_cells = [th.get_text(strip=True).lower() for th in header_th.find_all("th")]
-
-                  has_player = any("player" in h for h in header_cells)
-                  has_squad = any("squad" in h for h in header_cells)
-                  has_xg = any("xg" in h for h in header_cells)
-                  has_xa = any("xa" in h for h in header_cells)
-
-                  if has_player and has_squad and has_xg and has_xa:
-                      print(f"[DEBUG] Candidate expected stats table at index {idx} with columns: {header_cells}")
-                      target_table = table
-                      break
-
-              if target_table is None:
-                  raise Exception("Could not find an expected stats table with player/squad/xG/xA columns.")
-
-              rows_data = []
-              tbody = target_table.find("tbody")
-              if not tbody:
-                  raise Exception("Target table has no <tbody>")
-
-              for row in tbody.find_all("tr"):
-                  if "class" in row.attrs and "thead" in row["class"]:
-                      # Skip grouping header rows
-                      continue
-
-                  # Extract by data-stat attributes where possible
-                  def get_stat(stat_name):
-                      cell = row.find("td", {"data-stat": stat_name})
-                      if cell is None:
-                          return ""
-                      return cell.get_text(strip=True)
-
-                  player = get_stat("player")
-                  squad = get_stat("squad")
-                  xg = get_stat("xg")
-                  xa = get_stat("xa")
-                  npxg = get_stat("npxg")
-                  npxg_xa = get_stat("npxg_xa")
-                  minutes = get_stat("minutes") or get_stat("min") or get_stat("90s")
-
-                  if not player or not squad:
-                      continue
-
-                  # Convert minutes from 90s to real minutes if needed
-                  if get_stat("90s") and not get_stat("minutes") and not get_stat("min"):
-                      minutes_val = parse_number(minutes) * 90.0
-                  else:
-                      minutes_val = parse_number(minutes)
-
-                  team_short = TEAM_MAP.get(squad, squad)
-
-                  rows_data.append(
-                      {
-                          "web_name": player,
-                          "team_short": team_short,
-                          "xg": parse_number(xg),
-                          "xa": parse_number(xa),
-                          "npxg": parse_number(npxg),
-                          "npxg_xa": parse_number(npxg_xa),
-                          "minutes": minutes_val,
-                      }
-                  )
-
-              if not rows_data:
-                  raise Exception("Parsed 0 player rows from expected stats table.")
-
-              out = pd.DataFrame(rows_data)
               out.to_csv("xg_xa_latest.csv", index=False)
-              print(f"[SUCCESS] Created xg_xa_latest.csv with {len(out)} player rows.")
+              print("SUCCESS: Wrote", len(out), "rows to xg_xa_latest.csv")
 
           except Exception as e:
-              print("[ERROR] FBref xG/xA BeautifulSoup extraction failed:", e)
-              print("[DEBUG] Writing empty fallback CSV.")
+              print("FBref Expected Goals parse FAILED:", e)
               pd.DataFrame(
-                  {"web_name": [], "team_short": [], "xg": [], "xa": [], "npxg": [], "npxg_xa": [], "minutes": []}
+                  {
+                      "web_name": [],
+                      "team_short": [],
+                      "xg": [],
+                      "xa": [],
+                      "npxg": [],
+                      "npxg_xa": [],
+                      "minutes": []
+                  }
               ).to_csv("xg_xa_latest.csv", index=False)
+              print("Empty fallback CSV written.")
+
           EOF
 
       # -------------------------------------------------------
