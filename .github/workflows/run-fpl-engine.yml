@@ -11,7 +11,7 @@ jobs:
 
     steps:
       # -------------------------------------------------------
-      # 1. Checkout repo
+      # 1. Checkout repository
       # -------------------------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -32,136 +32,61 @@ jobs:
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      - name: Download FotMob EPL player stats (JSON API)
+      # -------------------------------------------------------
+      # 4. Build expected stats dataset (FPL API only)
+      # -------------------------------------------------------
+      - name: Build expected stats dataset (FPL API only)
         run: |
-          mkdir -p data
-          curl -L "https://www.fotmob.com/api/leagues?id=47&tab=players" \
-            -H "User-Agent: Mozilla/5.0" \
-            -H "Accept: application/json" \
-            -o data/fotmob_players.json
-          echo "FotMob JSON file size:"
-          wc -c data/fotmob_players.json
-
-      - name: Build expected stats dataset (FotMob-only + FPL API)
-        run: |
-          python -m pip install --quiet unidecode rapidfuzz
           python - << 'EOF'
-          import json, pandas as pd, requests
-          from unidecode import unidecode
-          from rapidfuzz import fuzz, process
+          import requests, pandas as pd
 
-          # -----------------------------
-          # Utility: normalize names
-          # -----------------------------
-          def norm(s):
-              if not s: return ""
-              import re
-              s = unidecode(str(s)).lower()
-              s = re.sub(r"[^a-z ]", " ", s)
-              return " ".join(s.split())
+          print("Fetching FPL API bootstrap...")
+          data = requests.get("https://fantasy.premierleague.com/api/bootstrap-static/").json()
 
-          # -----------------------------
-          # 1. Load FotMob JSON
-          # -----------------------------
-          with open("data/fotmob_players.json", "r", encoding="utf-8") as f:
-              fm = json.load(f)
+          teams = {t["id"]: t["short_name"] for t in data["teams"]}
 
-          # FotMob players are inside fm["players"]
-          fm_players_raw = fm.get("players", [])
+          rows = []
+          for p in data["elements"]:
+              minutes = float(p.get("minutes", 0) or 0)
 
-          fm_rows = []
-          for p in fm_players_raw:
-              fm_rows.append({
-                  "f_norm": norm(p.get("name")),
-                  "fotmob_name": p.get("name"),
-                  "fotmob_team": p.get("teamName"),
-                  "fotmob_xg": float(p.get("xG", 0)),
-                  "fotmob_xa": float(p.get("xA", 0)),
-                  "fotmob_shots": float(p.get("shots", 0)),
-                  "fotmob_keypasses": float(p.get("keyPasses", 0)),
-                  "fotmob_minutes": float(p.get("minsPlayed", 0)),
-                  "fotmob_role": p.get("position"),
-                  "fotmob_status": p.get("injuryStatus") or "",
-              })
+              xg = float(p.get("expected_goals", 0) or 0)
+              xa = float(p.get("expected_assists", 0) or 0)
+              xgi = float(p.get("expected_goal_involvements", xg + xa))
 
-          fdf = pd.DataFrame(fm_rows)
+              per90 = minutes / 90.0 if minutes > 0 else 0
+              xg90 = xg / per90 if per90 else 0
+              xa90 = xa / per90 if per90 else 0
+              xgi90 = xgi / per90 if per90 else 0
 
-          # -----------------------------
-          # 2. Load FPL API
-          # -----------------------------
-          bootstrap = requests.get(
-              "https://fantasy.premierleague.com/api/bootstrap-static/"
-          ).json()
-
-          teams = {t["id"]: t["short_name"] for t in bootstrap["teams"]}
-
-          fpl_rows = []
-          for p in bootstrap["elements"]:
-              fpl_rows.append({
+              rows.append({
                   "web_name": p["web_name"],
                   "team_short": teams[p["team"]],
-                  "norm": norm(p["web_name"]),
+                  "minutes": minutes,
+                  "xg": xg,
+                  "xa": xa,
+                  "xgi": xgi,
+                  "xg_per90": xg90,
+                  "xa_per90": xa90,
+                  "xgi_per90": xgi90,
+                  "news": p.get("news", ""),
+                  "status": p.get("status", ""),
+                  "chance_play_next": p.get("chance_of_playing_next_round", None),
+                  "chance_play_this": p.get("chance_of_playing_this_round", None),
               })
 
-          fpldf = pd.DataFrame(fpl_rows)
-
-          # -----------------------------
-          # 3. Hybrid Matching (simple + fuzzy fallback)
-          # -----------------------------
-          out = []
-
-          for _, row in fpldf.iterrows():
-              n = row["norm"]
-
-              # Simple match
-              m = fdf[fdf["f_norm"] == n]
-
-              # Fuzzy match fallback
-              if m.empty:
-                  match = process.extractOne(n, fdf["f_norm"], scorer=fuzz.token_sort_ratio)
-                  if match and match[1] >= 90:
-                      m = fdf[fdf["f_norm"] == match[0]]
-
-              # Build output row
-              if not m.empty:
-                  mr = m.iloc[0]
-                  out.append({
-                      "web_name": row["web_name"],
-                      "team_short": row["team_short"],
-                      "xg": mr["fotmob_xg"],
-                      "xa": mr["fotmob_xa"],
-                      "shots": mr["fotmob_shots"],
-                      "keypasses": mr["fotmob_keypasses"],
-                      "minutes": mr["fotmob_minutes"],
-                      "role": mr["fotmob_role"],
-                      "status": mr["fotmob_status"],
-                  })
-              else:
-                  out.append({
-                      "web_name": row["web_name"],
-                      "team_short": row["team_short"],
-                      "xg": 0,
-                      "xa": 0,
-                      "shots": 0,
-                      "keypasses": 0,
-                      "minutes": 0,
-                      "role": "",
-                      "status": "",
-                  })
-
-          outdf = pd.DataFrame(out)
-          outdf.to_csv("expected_stats_latest.csv", index=False)
-          print("Created expected_stats_latest.csv with", len(outdf), "rows")
+          df = pd.DataFrame(rows)
+          df.to_csv("expected_stats_latest.csv", index=False)
+          print("Created expected_stats_latest.csv with", len(df), "rows")
           EOF
 
       # -------------------------------------------------------
-      # 5. Run engine
+      # 5. Run FPL Engine
       # -------------------------------------------------------
       - name: Run FPL engine
         run: python engine_gw13.py
 
       # -------------------------------------------------------
-      # 6. Generate plain-text summary for email (pure Python)
+      # 6. Build email summary
       # -------------------------------------------------------
       - name: Build email summary
         id: summary
@@ -170,7 +95,6 @@ jobs:
           import glob
           import os
           from pathlib import Path
-
           import pandas as pd
 
           lines = ["FPL Engine Summary", ""]
@@ -216,7 +140,6 @@ jobs:
 
           summary_text = "\n".join(lines)
 
-          # Write to file for debugging
           Path("summary.txt").write_text(summary_text, encoding="utf-8")
 
           # Expose via GITHUB_OUTPUT
