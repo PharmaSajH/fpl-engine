@@ -387,8 +387,10 @@ def base_ep_from_poisson(row):
 def predict_gw_points(players, fixture_df):
     """
     Merge player data with fixture Poisson model and compute per-GW EP.
-    Also compute a robust EP that penalises volatile players.
+    FULL PLAYER DATA IS PRESERVED (critical for xgi_per90_model, ga_per90, minutes, etc.)
     """
+
+    # Merge full player dataframe with fixture difficulty model
     preds = players.merge(
         fixture_df,
         left_on="team",
@@ -396,35 +398,30 @@ def predict_gw_points(players, fixture_df):
         how="left",
     )
 
+    # Fill missing fixture model values
     preds["scoring_factor"] = preds["scoring_factor"].fillna(1.0).clip(0.6, 1.4)
     preds["cs_prob"] = preds["cs_prob"].fillna(0.0).clip(0.0, 1.0)
 
+    # Ensure volatility exists
     preds["volatility_score"] = preds.get("volatility_score", 0.0).fillna(0.0)
 
+    # Compute predicted minutes played (0–90 scale)
     preds["minutes_multiplier"] = preds.apply(minutes_factor, axis=1)
 
+    # FULL EP (shrunk xGI model is used inside base_ep_from_poisson)
     preds["base_ep"] = preds.apply(base_ep_from_poisson, axis=1)
 
+    # Multiply by expected minutes
     preds["predicted_points"] = preds["base_ep"] * preds["minutes_multiplier"]
 
+    # Robust (risk-adjusted) EP
     alpha = ROBUST_ALPHA
     preds["robust_predicted_points"] = (
         preds["predicted_points"] - alpha * preds["volatility_score"]
-    )
-    preds["robust_predicted_points"] = preds["robust_predicted_points"].clip(
-        lower=0.0
-    )
+    ).clip(lower=0.0)
 
-    keep = [
-        "id",
-        "predicted_points",
-        "robust_predicted_points",
-        "lambda_for",
-        "lambda_against",
-        "cs_prob",
-        "home_away",
-    ]
-    return preds[keep]
+    # DO NOT DROP ANY COLUMNS — return entire enriched preds
+    return preds
 
 
 def multi_gw_predictions(players, fixtures, start_gw, num_gws):
