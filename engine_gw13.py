@@ -17,7 +17,8 @@ OUTPUT_DOUBLE_CSV = None
 OUTPUT_MILP_PLAN_CSV = None
 
 # How much to penalise volatile players in robust EP
-ROBUST_ALPHA = 0.1  # try 0.3–0.7; higher = more risk averse
+# (higher = more risk averse; 0.3–0.7 is a good range)
+ROBUST_ALPHA = 0.3
 
 # -------------------------------
 
@@ -117,7 +118,7 @@ def build_players_df(data):
     vol = 0.5 * players["ga_per90"].fillna(0.0) + 0.5 * (
         players["form"] - players["points_per_game"]
     ).abs()
-    # Clip to avoid weird outliers, roughly 0–5
+    # Clip to avoid weird outliers, roughly 0–4
     players["volatility_score"] = vol.clip(0.0, 4.0)
     # ------------------------
 
@@ -324,6 +325,8 @@ def base_ep_from_poisson(row):
     xG/xA logic:
       - If xg_coverage_flag == 1 -> involvement = 0.6 * xGI + 0.4 * GA_per90
       - Else -> involvement = GA_per90 only (no xG penalty).
+
+    Uses shrunk/modelled xGI/90 if available to avoid tiny-sample explosions.
     """
     pos = row["position"]
 
@@ -331,7 +334,10 @@ def base_ep_from_poisson(row):
     lam_against = float(row.get("lambda_against", 1.2) or 1.2)
     cs_prob = float(row.get("cs_prob", 0.0) or 0.0)
 
-    xgi90 = float(row.get("xgi_per90", 0.0) or 0.0)
+    # Prefer modelled (shrunk/capped) xGI/90 if present
+    xgi90 = float(
+        row.get("xgi_per90_model", row.get("xgi_per90", 0.0)) or 0.0
+    )
     ga90 = float(row.get("ga_per90", 0.0) or 0.0)
     has_xg = int(row.get("xg_coverage_flag", 0) or 0)
 
@@ -1483,6 +1489,8 @@ def augment_players_with_expected_stats(
     We compute:
         - xg_per90 / xa_per90 / xgi_per90 if missing
         - xg_coverage_flag = 1 if minutes >= 300 and xgi_per90 > 0
+        - Shrunk/modelled per-90 stats to avoid tiny-sample explosions:
+            xg_per90_model, xa_per90_model, xgi_per90_model
 
     If the file is missing or malformed, we fall back gracefully
     and return players with zero xG/assist features.
@@ -1498,6 +1506,10 @@ def augment_players_with_expected_stats(
         players["xa_per90"] = 0.0
         players["xgi_per90"] = 0.0
         players["xg_coverage_flag"] = 0.0
+        # No modelled stats in fallback
+        players["xg_per90_model"] = 0.0
+        players["xa_per90_model"] = 0.0
+        players["xgi_per90_model"] = 0.0
         return players
     except Exception as e:
         print(f"[expected_stats] Failed to read '{stats_path}': {e}")
@@ -1505,6 +1517,9 @@ def augment_players_with_expected_stats(
         players["xa_per90"] = 0.0
         players["xgi_per90"] = 0.0
         players["xg_coverage_flag"] = 0.0
+        players["xg_per90_model"] = 0.0
+        players["xa_per90_model"] = 0.0
+        players["xgi_per90_model"] = 0.0
         return players
 
     # Normalise numeric columns
@@ -1538,6 +1553,54 @@ def augment_players_with_expected_stats(
     else:
         stats["xg_coverage_flag"] = 0.0
 
+    # -------- NEW: MINUTES-BASED SHRINKAGE & MODELLED PER-90 STATS --------
+    if "minutes" in stats.columns and "xgi_per90" in stats.columns:
+        MINUTES_PRIOR = 900.0  # ~10 full matches
+
+        total_minutes = float(stats["minutes"].sum())
+        # If we have xgi totals, use them; otherwise approximate from xgi_per90
+        if "xgi" in stats.columns and stats["xgi"].sum() > 0 and total_minutes > 0:
+            total_xgi = float(stats["xgi"].sum())
+            league_xgi_per90 = total_xgi / (total_minutes / 90.0)
+        elif total_minutes > 0:
+            # Fallback: average of existing xgi_per90
+            league_xgi_per90 = float(stats["xgi_per90"].mean())
+        else:
+            league_xgi_per90 = 0.25  # very rough fallback
+
+        minutes = stats["minutes"].clip(lower=0.0)
+        weight = minutes / (minutes + MINUTES_PRIOR)
+
+        # Shrunk xGI/90 toward league average
+        stats["xgi_per90_shrunk"] = league_xgi_per90 + weight * (
+            stats["xgi_per90"] - league_xgi_per90
+        )
+
+        # Split xGI into xG/xA proportions using original xg/xa if available
+        if "xg" in stats.columns and "xa" in stats.columns and "xgi" in stats.columns:
+            # Avoid division by zero
+            denom = stats["xgi"].replace(0, 1e-6)
+            xg_prop = stats["xg"] / denom
+            xa_prop = stats["xa"] / denom
+        else:
+            # Fallback: use existing per90 split
+            denom = stats["xgi_per90"].replace(0, 1e-6)
+            xg_prop = stats["xg_per90"] / denom
+            xa_prop = stats["xa_per90"] / denom
+
+        stats["xg_per90_shrunk"] = stats["xgi_per90_shrunk"] * xg_prop
+        stats["xa_per90_shrunk"] = stats["xgi_per90_shrunk"] * xa_prop
+
+        # Clip extremes to keep things realistic
+        stats["xgi_per90_model"] = stats["xgi_per90_shrunk"].clip(upper=1.00)
+        stats["xg_per90_model"] = stats["xg_per90_shrunk"].clip(upper=0.70)
+        stats["xa_per90_model"] = stats["xa_per90_shrunk"].clip(upper=0.70)
+    else:
+        stats["xgi_per90_model"] = 0.0
+        stats["xg_per90_model"] = 0.0
+        stats["xa_per90_model"] = 0.0
+    # ----------------------------------------------------------------------
+
     cols_keep = [
         "web_name",
         "team_short",
@@ -1545,6 +1608,9 @@ def augment_players_with_expected_stats(
         "xa_per90",
         "xgi_per90",
         "xg_coverage_flag",
+        "xg_per90_model",
+        "xa_per90_model",
+        "xgi_per90_model",
     ]
     stats = stats[[c for c in cols_keep if c in stats.columns]]
 
@@ -1561,6 +1627,9 @@ def augment_players_with_expected_stats(
         ("xa_per90", 0.0),
         ("xgi_per90", 0.0),
         ("xg_coverage_flag", 0.0),
+        ("xg_per90_model", 0.0),
+        ("xa_per90_model", 0.0),
+        ("xgi_per90_model", 0.0),
     ]:
         if col not in merged.columns:
             merged[col] = default
@@ -1568,6 +1637,7 @@ def augment_players_with_expected_stats(
             merged[col] = pd.to_numeric(merged[col], errors="coerce").fillna(default)
 
     print("[expected_stats] Successfully merged FPL expected-stats into players.")
+    print("[expected_stats] Applied minutes-based shrinkage to xGI per 90.")
     return merged
 
 
