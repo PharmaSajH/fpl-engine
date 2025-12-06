@@ -21,17 +21,20 @@ ROBUST_ALPHA = 0.1  # try 0.3–0.7; higher = more risk averse
 
 # -------------------------------
 
+
 def fetch_bootstrap():
     url = "https://fantasy.premierleague.com/api/bootstrap-static/"
     r = requests.get(url)
     r.raise_for_status()
     return r.json()
 
+
 def fetch_fixtures():
     url = "https://fantasy.premierleague.com/api/fixtures/"
     r = requests.get(url)
     r.raise_for_status()
     return r.json()
+
 
 def fetch_manager_picks_and_bank(team_id, gw):
     url = f"https://fantasy.premierleague.com/api/entry/{team_id}/event/{gw}/picks/"
@@ -45,6 +48,7 @@ def fetch_manager_picks_and_bank(team_id, gw):
     bank_tenths = entry_hist.get("bank", 0)
     value_tenths = entry_hist.get("value", 0)
     return picks, bank_tenths, value_tenths
+
 
 def build_players_df(data):
     players = pd.DataFrame(data["elements"])
@@ -62,24 +66,45 @@ def build_players_df(data):
     players = players.rename(columns={"singular_name_short": "position"})
 
     keep_cols = [
-        "id", "web_name", "team", "team_name", "team_short", "position", "now_cost",
-        "total_points", "minutes", "points_per_game", "form", "goals_scored",
-        "assists", "clean_sheets", "chance_of_playing_next_round",
-        "selected_by_percent", "status",
+        "id",
+        "web_name",
+        "team",
+        "team_name",
+        "team_short",
+        "position",
+        "now_cost",
+        "total_points",
+        "minutes",
+        "points_per_game",
+        "form",
+        "goals_scored",
+        "assists",
+        "clean_sheets",
+        "chance_of_playing_next_round",
+        "selected_by_percent",
+        "status",
     ]
     players = players[keep_cols]
 
     players["price"] = players["now_cost"] / 10.0
-    players["points_per_game"] = pd.to_numeric(players["points_per_game"], errors="coerce").fillna(0.0)
+    players["points_per_game"] = pd.to_numeric(
+        players["points_per_game"], errors="coerce"
+    ).fillna(0.0)
     players["form"] = pd.to_numeric(players["form"], errors="coerce").fillna(0.0)
-    players["selected_by_percent"] = pd.to_numeric(players["selected_by_percent"], errors="coerce").fillna(0.0)
+    players["selected_by_percent"] = pd.to_numeric(
+        players["selected_by_percent"], errors="coerce"
+    ).fillna(0.0)
 
     minutes = players["minutes"].replace(0, np.nan)
     players["g_per90"] = players["goals_scored"] / minutes * 90
     players["a_per90"] = players["assists"] / minutes * 90
 
-    players["g_per90"] = players["g_per90"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
-    players["a_per90"] = players["a_per90"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    players["g_per90"] = (
+        players["g_per90"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    )
+    players["a_per90"] = (
+        players["a_per90"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    )
 
     # Cap per-90 rates to realistic ranges
     players["g_per90"] = players["g_per90"].clip(0, 1.2)
@@ -89,15 +114,15 @@ def build_players_df(data):
 
     # --- VOLATILITY SCORE ---
     # Simple proxy: attacking involvement + instability in recent form
-    vol = (
-    0.5 * players["ga_per90"].fillna(0.0)
-    + 0.5 * (players["form"] - players["points_per_game"]).abs()
-    )
+    vol = 0.5 * players["ga_per90"].fillna(0.0) + 0.5 * (
+        players["form"] - players["points_per_game"]
+    ).abs()
     # Clip to avoid weird outliers, roughly 0–5
     players["volatility_score"] = vol.clip(0.0, 4.0)
     # ------------------------
 
     return players
+
 
 def compute_team_goal_model(fixtures, window_gws=8, min_matches=4):
     """
@@ -115,7 +140,9 @@ def compute_team_goal_model(fixtures, window_gws=8, min_matches=4):
     hist = fx[mask].copy()
     if hist.empty:
         teams = pd.unique(pd.concat([fx["team_h"], fx["team_a"]], ignore_index=True))
-        return pd.DataFrame({"team_id": teams, "att_strength": 1.0, "def_strength": 1.0})
+        return pd.DataFrame(
+            {"team_id": teams, "att_strength": 1.0, "def_strength": 1.0}
+        )
 
     # Restrict to last N gameweeks
     if "event" in hist.columns:
@@ -124,16 +151,20 @@ def compute_team_goal_model(fixtures, window_gws=8, min_matches=4):
 
     rows = []
     for _, r in hist.iterrows():
-        rows.append({
-            "team_id": r["team_h"],
-            "goals_for": r["team_h_score"],
-            "goals_against": r["team_a_score"],
-        })
-        rows.append({
-            "team_id": r["team_a"],
-            "goals_for": r["team_a_score"],
-            "goals_against": r["team_h_score"],
-        })
+        rows.append(
+            {
+                "team_id": r["team_h"],
+                "goals_for": r["team_h_score"],
+                "goals_against": r["team_a_score"],
+            }
+        )
+        rows.append(
+            {
+                "team_id": r["team_a"],
+                "goals_for": r["team_a_score"],
+                "goals_against": r["team_h_score"],
+            }
+        )
     tall = pd.DataFrame(rows)
 
     grouped = tall.groupby("team_id").agg(
@@ -146,7 +177,9 @@ def compute_team_goal_model(fixtures, window_gws=8, min_matches=4):
     grouped = grouped[grouped["matches"] >= min_matches]
     if grouped.empty:
         teams = pd.unique(pd.concat([fx["team_h"], fx["team_a"]], ignore_index=True))
-        return pd.DataFrame({"team_id": teams, "att_strength": 1.0, "def_strength": 1.0})
+        return pd.DataFrame(
+            {"team_id": teams, "att_strength": 1.0, "def_strength": 1.0}
+        )
 
     grouped["gf_per_match"] = grouped["gf"] / grouped["matches"]
     grouped["ga_per_match"] = grouped["ga"] / grouped["matches"]
@@ -164,6 +197,7 @@ def compute_team_goal_model(fixtures, window_gws=8, min_matches=4):
 
     return grouped[["team_id", "att_strength", "def_strength"]]
 
+
 def build_fixture_difficulty_df(fixtures, gw, team_model, base_lambda=1.4):
     """
     For a given GW, build fixture-level Poisson features for each team:
@@ -180,15 +214,26 @@ def build_fixture_difficulty_df(fixtures, gw, team_model, base_lambda=1.4):
     # Merge team strengths for home and away
     tm_h = team_model.rename(columns={"team_id": "team_h"})
     gw_fx = gw_fx.merge(tm_h, on="team_h", how="left")
-    tm_a = team_model.rename(columns={"team_id": "team_a", "att_strength": "att_strength_a", "def_strength": "def_strength_a"})
+    tm_a = team_model.rename(
+        columns={
+            "team_id": "team_a",
+            "att_strength": "att_strength_a",
+            "def_strength": "def_strength_a",
+        }
+    )
     gw_fx = gw_fx.merge(tm_a, on="team_a", how="left")
 
     # Fill missing strengths with neutral 1.0
     for col in ["att_strength", "def_strength", "att_strength_a", "def_strength_a"]:
         if col not in gw_fx.columns:
             gw_fx[col] = 1.0
-    gw_fx[["att_strength", "def_strength", "att_strength_a", "def_strength_a"]] = \
-        gw_fx[["att_strength", "def_strength", "att_strength_a", "def_strength_a"]].fillna(1.0)
+    gw_fx[
+        ["att_strength", "def_strength", "att_strength_a", "def_strength_a"]
+    ] = gw_fx[
+        ["att_strength", "def_strength", "att_strength_a", "def_strength_a"]
+    ].fillna(
+        1.0
+    )
 
     rows = []
     for _, r in gw_fx.iterrows():
@@ -202,51 +247,71 @@ def build_fixture_difficulty_df(fixtures, gw, team_model, base_lambda=1.4):
         lam_away = base_lambda * att_a / max(def_h, 1e-3)
 
         # Home side record
-        rows.append({
-            "team_id": r["team_h"],
-            "opponent_id": r["team_a"],
-            "home_away": "H",
-            "lambda_for": lam_home,
-            "lambda_against": lam_away,
-            "scoring_factor": lam_home / base_lambda,
-            "cs_prob": float(np.exp(-lam_away)),  # P(0 goals against) under Poisson
-        })
+        rows.append(
+            {
+                "team_id": r["team_h"],
+                "opponent_id": r["team_a"],
+                "home_away": "H",
+                "lambda_for": lam_home,
+                "lambda_against": lam_away,
+                "scoring_factor": lam_home / base_lambda,
+                "cs_prob": float(np.exp(-lam_away)),  # P(0 goals against) under Poisson
+            }
+        )
         # Away side record
-        rows.append({
-            "team_id": r["team_a"],
-            "opponent_id": r["team_h"],
-            "home_away": "A",
-            "lambda_for": lam_away,
-            "lambda_against": lam_home,
-            "scoring_factor": lam_away / base_lambda,
-            "cs_prob": float(np.exp(-lam_home)),
-        })
+        rows.append(
+            {
+                "team_id": r["team_a"],
+                "opponent_id": r["team_h"],
+                "home_away": "A",
+                "lambda_for": lam_away,
+                "lambda_against": lam_home,
+                "scoring_factor": lam_away / base_lambda,
+                "cs_prob": float(np.exp(-lam_home)),
+            }
+        )
 
     df = pd.DataFrame(rows)
     # One row per team in that GW
     df = df.groupby("team_id", as_index=False).first()
     return df
 
+
 def difficulty_to_multiplier(difficulty):
-    if pd.isna(difficulty): return 1.0
+    if pd.isna(difficulty):
+        return 1.0
     d = float(difficulty)
-    if d <= 1: return 1.25
-    elif d == 2: return 1.12
-    elif d == 3: return 1.00
-    elif d == 4: return 0.90
-    else: return 0.80
+    if d <= 1:
+        return 1.25
+    elif d == 2:
+        return 1.12
+    elif d == 3:
+        return 1.00
+    elif d == 4:
+        return 0.90
+    else:
+        return 0.80
+
 
 def minutes_factor(row):
     status = row["status"]
-    if status in ("i", "s"): return 0.0
+    if status in ("i", "s"):
+        return 0.0
     cop = row.get("chance_of_playing_next_round", None)
-    if pd.notna(cop): return float(cop) / 100.0
+    if pd.notna(cop):
+        return float(cop) / 100.0
     minutes = row.get("minutes", 0)
-    if minutes <= 0: return 0.0
-    if minutes >= 900: return 0.9
-    elif minutes >= 450: return 0.7
-    elif minutes >= 180: return 0.5
-    else: return 0.3
+    if minutes <= 0:
+        return 0.0
+    if minutes >= 900:
+        return 0.9
+    elif minutes >= 450:
+        return 0.7
+    elif minutes >= 180:
+        return 0.5
+    else:
+        return 0.3
+
 
 def base_ep_from_poisson(row):
     """
@@ -315,13 +380,17 @@ def base_ep_from_poisson(row):
     ep_full_match = base_points + atk_points + cs_points - defence_penalty + form_boost
     return max(ep_full_match, 0.0)
 
+
 def predict_gw_points(players, fixture_df):
     """
     Merge player data with fixture Poisson model and compute per-GW EP.
     Also compute a robust EP that penalises volatile players.
     """
     preds = players.merge(
-        fixture_df, left_on="team", right_on="team_id", how="left",
+        fixture_df,
+        left_on="team",
+        right_on="team_id",
+        how="left",
     )
 
     preds["scoring_factor"] = preds["scoring_factor"].fillna(1.0).clip(0.6, 1.4)
@@ -341,8 +410,12 @@ def predict_gw_points(players, fixture_df):
 
     # Robust EP: penalise volatility
     alpha = ROBUST_ALPHA
-    preds["robust_predicted_points"] = preds["predicted_points"] - alpha * preds["volatility_score"]
-    preds["robust_predicted_points"] = preds["robust_predicted_points"].clip(lower=0.0)
+    preds["robust_predicted_points"] = (
+        preds["predicted_points"] - alpha * preds["volatility_score"]
+    )
+    preds["robust_predicted_points"] = preds["robust_predicted_points"].clip(
+        lower=0.0
+    )
 
     keep = [
         "id",
@@ -383,7 +456,7 @@ def multi_gw_predictions(players, fixtures, start_gw, num_gws):
         results = results.merge(
             gw_preds[["id", "predicted_points", "robust_predicted_points"]],
             on="id",
-            how="left"
+            how="left",
         )
 
         results[colname] = results["predicted_points"].fillna(0.0)
@@ -416,7 +489,9 @@ def attach_manager_view(preds, picks_df):
     else:
         picks_df["sell_price"] = np.nan
     merged = preds.merge(
-        picks_df[["id", "position", "multiplier", "is_captain", "is_vice_captain", "sell_price"]],
+        picks_df[
+            ["id", "position", "multiplier", "is_captain", "is_vice_captain", "sell_price"]
+        ],
         on="id",
         how="left",
         suffixes=("", "_pick"),
@@ -427,6 +502,7 @@ def attach_manager_view(preds, picks_df):
     merged["is_vice_captain"] = merged["is_vice_captain"].fillna(False)
     myteam = merged[merged["owned"]].copy()
     return merged, myteam
+
 
 def suggest_best_single_transfers_multi_gw(
     preds_all,
@@ -447,7 +523,11 @@ def suggest_best_single_transfers_multi_gw(
     if myteam.empty:
         return None
 
-    metric = "multi_gw_points_robust" if "multi_gw_points_robust" in preds_all.columns else "multi_gw_points"
+    metric = (
+        "multi_gw_points_robust"
+        if "multi_gw_points_robust" in preds_all.columns
+        else "multi_gw_points"
+    )
 
     bank = (bank_tenths or 0) / 10.0
 
@@ -455,10 +535,18 @@ def suggest_best_single_transfers_multi_gw(
     candidates_all = preds_all.copy()
 
     # Ensure numeric columns
-    candidates_all["minutes"] = pd.to_numeric(candidates_all.get("minutes", 0), errors="coerce").fillna(0)
-    candidates_all["selected_by_percent"] = pd.to_numeric(candidates_all.get("selected_by_percent", 0.0), errors="coerce").fillna(0.0)
-    candidates_all["form"] = pd.to_numeric(candidates_all.get("form", 0.0), errors="coerce").fillna(0.0)
-    candidates_all["points_per_game"] = pd.to_numeric(candidates_all.get("points_per_game", 0.0), errors="coerce").fillna(0.0)
+    candidates_all["minutes"] = pd.to_numeric(
+        candidates_all.get("minutes", 0), errors="coerce"
+    ).fillna(0)
+    candidates_all["selected_by_percent"] = pd.to_numeric(
+        candidates_all.get("selected_by_percent", 0.0), errors="coerce"
+    ).fillna(0.0)
+    candidates_all["form"] = pd.to_numeric(
+        candidates_all.get("form", 0.0), errors="coerce"
+    ).fillna(0.0)
+    candidates_all["points_per_game"] = pd.to_numeric(
+        candidates_all.get("points_per_game", 0.0), errors="coerce"
+    ).fillna(0.0)
 
     # === GLOBAL SAFETY FILTERS ===
     candidates_all = candidates_all[
@@ -534,6 +622,7 @@ def suggest_best_single_transfers_multi_gw(
     suggestions_df = pd.DataFrame(suggestions).sort_values("gain", ascending=False)
     return suggestions_df
 
+
 def suggest_best_double_transfers_multi_gw(
     preds_all,
     myteam,
@@ -562,7 +651,11 @@ def suggest_best_double_transfers_multi_gw(
         return None
 
     # Use robust metric if present, otherwise raw
-    metric = "multi_gw_points_robust" if "multi_gw_points_robust" in preds_all.columns else "multi_gw_points"
+    metric = (
+        "multi_gw_points_robust"
+        if "multi_gw_points_robust" in preds_all.columns
+        else "multi_gw_points"
+    )
 
     bank = (bank_tenths or 0) / 10.0
 
@@ -570,10 +663,18 @@ def suggest_best_double_transfers_multi_gw(
     candidates_all = preds_all.sort_values(metric, ascending=False).copy()
 
     # === NEW: safety filters for candidates ===
-    candidates_all["minutes"] = pd.to_numeric(candidates_all.get("minutes", 0), errors="coerce").fillna(0)
-    candidates_all["selected_by_percent"] = pd.to_numeric(candidates_all.get("selected_by_percent", 0.0), errors="coerce").fillna(0.0)
-    candidates_all["form"] = pd.to_numeric(candidates_all.get("form", 0.0), errors="coerce").fillna(0.0)
-    candidates_all["points_per_game"] = pd.to_numeric(candidates_all.get("points_per_game", 0.0), errors="coerce").fillna(0.0)
+    candidates_all["minutes"] = pd.to_numeric(
+        candidates_all.get("minutes", 0), errors="coerce"
+    ).fillna(0)
+    candidates_all["selected_by_percent"] = pd.to_numeric(
+        candidates_all.get("selected_by_percent", 0.0), errors="coerce"
+    ).fillna(0.0)
+    candidates_all["form"] = pd.to_numeric(
+        candidates_all.get("form", 0.0), errors="coerce"
+    ).fillna(0.0)
+    candidates_all["points_per_game"] = pd.to_numeric(
+        candidates_all.get("points_per_game", 0.0), errors="coerce"
+    ).fillna(0.0)
 
     MIN_MINUTES = 300
     MIN_SELECTED = 0.5
@@ -629,8 +730,12 @@ def suggest_best_double_transfers_multi_gw(
 
             # Club counts after selling these two
             cc_after_sell = club_counts.copy()
-            cc_after_sell[row1["team_short"]] = cc_after_sell.get(row1["team_short"], 1) - 1
-            cc_after_sell[row2["team_short"]] = cc_after_sell.get(row2["team_short"], 1) - 1
+            cc_after_sell[row1["team_short"]] = cc_after_sell.get(
+                row1["team_short"], 1
+            ) - 1
+            cc_after_sell[row2["team_short"]] = cc_after_sell.get(
+                row2["team_short"], 1
+            ) - 1
 
             # Build candidate pools for each position
             pool1 = pos_top[pos1].copy()
@@ -672,7 +777,9 @@ def suggest_best_double_transfers_multi_gw(
                         continue
 
                     # Projected points for the two incoming players
-                    new_points = float(buy1.get(metric, 0.0)) + float(buy2.get(metric, 0.0))
+                    new_points = float(buy1.get(metric, 0.0)) + float(
+                        buy2.get(metric, 0.0)
+                    )
                     gain = new_points - current_points
                     if gain <= 0:
                         continue
@@ -683,37 +790,38 @@ def suggest_best_double_transfers_multi_gw(
                     hit_points = extra_transfers * hit_cost
                     net_gain = gain - hit_points
 
-                    suggestions.append({
-                        "sell1": row1["web_name"],
-                        "sell1_team": row1["team_short"],
-                        "sell1_price": round(float(sell_price1), 1),
-                        "sell1_pred": round(current_pred1, 3),
-
-                        "buy1": buy1["web_name"],
-                        "buy1_team": buy1["team_short"],
-                        "buy1_price": round(price1, 1),
-                        "buy1_pred": round(float(buy1.get(metric, 0.0)), 3),
-
-                        "sell2": row2["web_name"],
-                        "sell2_team": row2["team_short"],
-                        "sell2_price": round(float(sell_price2), 1),
-                        "sell2_pred": round(current_pred2, 3),
-
-                        "buy2": buy2["web_name"],
-                        "buy2_team": buy2["team_short"],
-                        "buy2_price": round(price2, 1),
-                        "buy2_pred": round(float(buy2.get(metric, 0.0)), 3),
-
-                        "gain": round(float(gain), 3),
-                        "hit_points": hit_points,
-                        "net_gain": round(float(net_gain), 3),
-                    })
+                    suggestions.append(
+                        {
+                            "sell1": row1["web_name"],
+                            "sell1_team": row1["team_short"],
+                            "sell1_price": round(float(sell_price1), 1),
+                            "sell1_pred": round(current_pred1, 3),
+                            "buy1": buy1["web_name"],
+                            "buy1_team": buy1["team_short"],
+                            "buy1_price": round(price1, 1),
+                            "buy1_pred": round(float(buy1.get(metric, 0.0)), 3),
+                            "sell2": row2["web_name"],
+                            "sell2_team": row2["team_short"],
+                            "sell2_price": round(float(sell_price2), 1),
+                            "sell2_pred": round(current_pred2, 3),
+                            "buy2": buy2["web_name"],
+                            "buy2_team": buy2["team_short"],
+                            "buy2_price": round(price2, 1),
+                            "buy2_pred": round(float(buy2.get(metric, 0.0)), 3),
+                            "gain": round(float(gain), 3),
+                            "hit_points": hit_points,
+                            "net_gain": round(float(net_gain), 3),
+                        }
+                    )
 
     if not suggestions:
         return None
 
-    suggestions_df = pd.DataFrame(suggestions).sort_values("net_gain", ascending=False)
+    suggestions_df = pd.DataFrame(suggestions).sort_values(
+        "net_gain", ascending=False
+    )
     return suggestions_df
+
 
 from pulp import LpProblem, LpVariable, LpMaximize, lpSum, LpStatus
 
@@ -732,9 +840,15 @@ def optimise_wildcard_squad_milp(preds_all, total_budget_m, max_per_team=3):
     df = preds_all.copy()
 
     # Use robust EP if available, otherwise raw
-    metric = "multi_gw_points_robust" if "multi_gw_points_robust" in df.columns else "multi_gw_points"
+    metric = (
+        "multi_gw_points_robust"
+        if "multi_gw_points_robust" in df.columns
+        else "multi_gw_points"
+    )
     if metric not in df.columns:
-        raise ValueError("Expected multi_gw_points(_robust) in preds_all for MILP optimiser.")
+        raise ValueError(
+            "Expected multi_gw_points(_robust) in preds_all for MILP optimiser."
+        )
 
     # Basic cleaning
     df = df.dropna(subset=[metric, "price", "position", "team_short"])
@@ -748,7 +862,7 @@ def optimise_wildcard_squad_milp(preds_all, total_budget_m, max_per_team=3):
     # Position requirements (standard FPL)
     POS_REQ = {
         "GKP": 2,
-        "GK": 2,   # in case goalkeeper is labelled GK
+        "GK": 2,  # in case goalkeeper is labelled GK
         "DEF": 5,
         "MID": 5,
         "FWD": 3,
@@ -758,10 +872,7 @@ def optimise_wildcard_squad_milp(preds_all, total_budget_m, max_per_team=3):
     prob = LpProblem("FPL_Wildcard_MILP", LpMaximize)
 
     # Binary decision variable x_i: 1 if player i is in the final squad
-    x = [
-        LpVariable(f"x_{i}", lowBound=0, upBound=1, cat="Binary")
-        for i in range(n)
-    ]
+    x = [LpVariable(f"x_{i}", lowBound=0, upBound=1, cat="Binary") for i in range(n)]
 
     # --- Objective: maximise total robust expected points ---
     prob += lpSum(df[metric].iloc[i] * x[i] for i in range(n)), "Total_Robust_EP"
@@ -785,7 +896,9 @@ def optimise_wildcard_squad_milp(preds_all, total_budget_m, max_per_team=3):
         prob += lpSum(x[i] for i in idx) <= max_per_team, f"Team_{team}_limit"
 
     # --- Constraint: budget ---
-    prob += lpSum(df["price"].iloc[i] * x[i] for i in range(n)) <= total_budget_m, "Budget"
+    prob += (
+        lpSum(df["price"].iloc[i] * x[i] for i in range(n)) <= total_budget_m
+    ), "Budget"
 
     # --- Solve ---
     prob.solve()
@@ -805,8 +918,6 @@ def optimise_wildcard_squad_milp(preds_all, total_budget_m, max_per_team=3):
     squad["total_price"] = squad["price"].sum()
 
     return squad
-
-from pulp import LpProblem, LpVariable, LpMaximize, lpSum, LpStatus
 
 
 def optimise_transfers_milp(
@@ -858,7 +969,9 @@ def optimise_transfers_milp(
     required_cols = ["id", "team_short", "position", "price", "owned"]
     for c in required_cols:
         if c not in df.columns:
-            raise ValueError(f"MILP transfer optimiser needs column '{c}' in preds_all.")
+            raise ValueError(
+                f"MILP transfer optimiser needs column '{c}' in preds_all."
+            )
 
     # If sell_price missing, fall back to price
     if "sell_price" not in df.columns:
@@ -874,7 +987,7 @@ def optimise_transfers_milp(
     # Position requirements
     POS_REQ = {
         "GKP": 2,
-        "GK": 2,   # handle GK vs GKP naming
+        "GK": 2,  # handle GK vs GKP naming
         "DEF": 5,
         "MID": 5,
         "FWD": 3,
@@ -895,10 +1008,7 @@ def optimise_transfers_milp(
     prob = LpProblem("FPL_Transfers_MILP", LpMaximize)
 
     # Decision variable: x[i] = 1 if player i is in the final squad
-    x = [
-        LpVariable(f"x_{i}", lowBound=0, upBound=1, cat="Binary")
-        for i in range(n)
-    ]
+    x = [LpVariable(f"x_{i}", lowBound=0, upBound=1, cat="Binary") for i in range(n)]
 
     # out[i] for currently owned players: 1 if we sell them
     out = {
@@ -917,8 +1027,7 @@ def optimise_transfers_milp(
 
     # --- Objective: maximise total robust EP minus hit cost ---
     prob += (
-        lpSum(df[metric].iloc[i] * x[i] for i in range(n))
-        - hit_cost * extra
+        lpSum(df[metric].iloc[i] * x[i] for i in range(n)) - hit_cost * extra
     ), "Total_Robust_EP_minus_Hits"
 
     # --- Squad size: 15 players ---
@@ -951,26 +1060,35 @@ def optimise_transfers_milp(
         prob += _in[j] - x[j] <= 0, f"NotOwned_in_if_selected2_{j}"
 
     # Transfers in and out must balance
-    prob += lpSum(_in[j] for j in idx_not_owned) == lpSum(out[i] for i in idx_owned), "Buy_Sell_Balance"
+    prob += (
+        lpSum(_in[j] for j in idx_not_owned)
+        == lpSum(out[i] for i in idx_owned)
+    ), "Buy_Sell_Balance"
 
     # Total transfers
     total_transfers = lpSum(_in[j] for j in idx_not_owned)
 
     # Limit total transfers to free + max_additional_transfers
-    prob += total_transfers <= free_transfers + max_additional_transfers, "MaxTransfers"
+    prob += (
+        total_transfers <= free_transfers + max_additional_transfers
+    ), "MaxTransfers"
 
     # extra >= transfers - free_transfers, extra >= 0
     prob += extra >= total_transfers - free_transfers, "ExtraTransfersLowerBound"
     prob += extra >= 0, "ExtraTransfersNonNeg"
 
     # --- Budget constraint ---
-    prob += lpSum(df["price"].iloc[i] * x[i] for i in range(n)) <= total_budget_m, "Budget"
+    prob += (
+        lpSum(df["price"].iloc[i] * x[i] for i in range(n)) <= total_budget_m
+    ), "Budget"
 
     # --- Solve ---
     prob.solve()
 
     if LpStatus[prob.status] != "Optimal":
-        print(f"MILP transfers: no optimal solution (status={LpStatus[prob.status]}).")
+        print(
+            f"MILP transfers: no optimal solution (status={LpStatus[prob.status]})."
+        )
         return None, None
 
     # Build final squad
@@ -1020,6 +1138,7 @@ def optimise_transfers_milp(
     final_squad["budget_limit"] = total_budget_m
 
     return final_squad, transfers_df
+
 
 def optimise_transfers_milp_multi_horizon(
     preds_all,
@@ -1079,8 +1198,10 @@ def optimise_transfers_milp_multi_horizon(
         elif raw_col in df.columns:
             gw_metric_cols[gw] = raw_col
         else:
-            raise ValueError(f"Missing per-GW EP columns for GW{gw} "
-                             f"(expected {robust_col} or {raw_col}).")
+            raise ValueError(
+                f"Missing per-GW EP columns for GW{gw} "
+                f"(expected {robust_col} or {raw_col})."
+            )
 
     # Only consider available / doubtful players
     df = df[df["status"].isin(["a", "d"])].copy()
@@ -1127,8 +1248,12 @@ def optimise_transfers_milp_multi_horizon(
     out_var = {}
     for i in range(n):
         for g in range(1, G + 1):
-            in_var[(i, g)] = LpVariable(f"in_{i}_{g}", lowBound=0, upBound=1, cat="Binary")
-            out_var[(i, g)] = LpVariable(f"out_{i}_{g}", lowBound=0, upBound=1, cat="Binary")
+            in_var[(i, g)] = LpVariable(
+                f"in_{i}_{g}", lowBound=0, upBound=1, cat="Binary"
+            )
+            out_var[(i, g)] = LpVariable(
+                f"out_{i}_{g}", lowBound=0, upBound=1, cat="Binary"
+            )
 
     # Extra transfers (beyond free) per GW
     extra_g = {
@@ -1156,8 +1281,7 @@ def optimise_transfers_milp_multi_horizon(
         # Flow: x[i,g] = x[i,g-1] + in - out
         for i in range(n):
             prob += (
-                x[(i, g)]
-                == x[(i, g - 1)] + in_var[(i, g)] - out_var[(i, g)]
+                x[(i, g)] == x[(i, g - 1)] + in_var[(i, g)] - out_var[(i, g)]
             ), f"Flow_{i}_{g}"
 
         # Transfers in/out must balance
@@ -1176,7 +1300,9 @@ def optimise_transfers_milp_multi_horizon(
         prob += extra_g[g] >= 0, f"ExtraNonNeg_{g}"
 
     # Cap total extra transfers converted to hits
-    max_extra_transfers_total = max_extra_hits / float(hit_cost) if hit_cost > 0 else 0.0
+    max_extra_transfers_total = (
+        max_extra_hits / float(hit_cost) if hit_cost > 0 else 0.0
+    )
     prob += (
         lpSum(extra_g[g] for g in range(1, G + 1)) <= max_extra_transfers_total
     ), "MaxExtraTransfersTotal"
@@ -1196,9 +1322,7 @@ def optimise_transfers_milp_multi_horizon(
 
         # GK count
         if gk_idx:
-            prob += (
-                lpSum(x[(i, g)] for i in gk_idx) == 2
-            ), f"GK_Count_{g}"
+            prob += lpSum(x[(i, g)] for i in gk_idx) == 2, f"GK_Count_{g}"
 
         # DEF/MID/FWD counts
         for pos in ["DEF", "MID", "FWD"]:
@@ -1270,9 +1394,12 @@ def optimise_transfers_milp_multi_horizon(
                     }
                 )
 
-    transfers_df = pd.DataFrame(transfers_rows).sort_values(["gw", "type", "web_name"])
+    transfers_df = pd.DataFrame(transfers_rows).sort_values(
+        ["gw", "type", "web_name"]
+    )
 
     return squads_by_gw, transfers_df
+
 
 def generate_email_summary(preds_myteam, preds_all, single_df, double_df, milp_squad):
     """
@@ -1337,27 +1464,36 @@ def generate_email_summary(preds_myteam, preds_all, single_df, double_df, milp_s
 
     return "\n".join(lines)
 
+
 def augment_players_with_expected_stats(
     players: pd.DataFrame,
     stats_path: str = "expected_stats_latest.csv",
 ):
     """
-    Optionally augment the players DataFrame with external expected-stats features
-    (Understat + FotMob merged).
+    Augment the players DataFrame with FPL-based expected stats
+    from the pre-built CSV `expected_stats_latest.csv`.
 
-    Expects a CSV with at least:
+    CSV is produced by the GitHub Actions step and is expected
+    to contain (at least):
+
         web_name, team_short,
-        understat_xg, understat_xa, understat_npxg, understat_minutes,
-        fotmob_xg, fotmob_xa, fotmob_minutes_recent, fotmob_starts_recent,
-        fotmob_role, fotmob_availability
+        minutes, xg, xa, xgi,
+        xg_per90, xa_per90, xgi_per90
 
-    If the file is missing or malformed, we fall back gracefully and return
-    `players` with zeroed xg/xa/xgi columns and xg_coverage_flag = 0.
+    We compute:
+        - xg_per90 / xa_per90 / xgi_per90 if missing
+        - xg_coverage_flag = 1 if minutes >= 300 and xgi_per90 > 0
+
+    If the file is missing or malformed, we fall back gracefully
+    and return players with zero xG/assist features.
     """
     try:
         stats = pd.read_csv(stats_path)
     except FileNotFoundError:
-        print(f"[expected_stats] No file '{stats_path}' found. Proceeding without enrichment.")
+        print(
+            f"[expected_stats] No file '{stats_path}' found. "
+            "Proceeding without enrichment."
+        )
         players["xg_per90"] = 0.0
         players["xa_per90"] = 0.0
         players["xgi_per90"] = 0.0
@@ -1371,79 +1507,46 @@ def augment_players_with_expected_stats(
         players["xg_coverage_flag"] = 0.0
         return players
 
-    # Normalise expected-stats columns
-    for col in [
-        "understat_xg",
-        "understat_xa",
-        "understat_npxg",
-        "understat_minutes",
-        "fotmob_xg",
-        "fotmob_xa",
-        "fotmob_minutes_recent",
-        "fotmob_starts_recent",
-    ]:
+    # Normalise numeric columns
+    for col in ["minutes", "xg", "xa", "xgi", "xg_per90", "xa_per90", "xgi_per90"]:
         if col in stats.columns:
             stats[col] = pd.to_numeric(stats[col], errors="coerce").fillna(0.0)
-        else:
-            stats[col] = 0.0
 
-    # Basic sanity: keep only needed columns
-    keep_cols = [
+    # If per90 columns are missing but totals exist, compute them
+    if "xgi_per90" not in stats.columns or stats["xgi_per90"].sum() == 0:
+        if {"xg", "xa", "minutes"}.issubset(stats.columns):
+            minutes = stats["minutes"].replace(0, np.nan)
+            xg90 = stats["xg"] / (minutes / 90.0)
+            xa90 = stats["xa"] / (minutes / 90.0)
+            stats["xg_per90"] = (
+                xg90.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+            )
+            stats["xa_per90"] = (
+                xa90.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+            )
+            stats["xgi_per90"] = stats["xg_per90"] + stats["xa_per90"]
+        else:
+            stats["xg_per90"] = 0.0
+            stats["xa_per90"] = 0.0
+            stats["xgi_per90"] = 0.0
+
+    # Coverage flag: reasonable minutes + some xGI signal
+    if "minutes" in stats.columns and "xgi_per90" in stats.columns:
+        stats["xg_coverage_flag"] = (
+            (stats["minutes"] >= 300) & (stats["xgi_per90"] > 0)
+        ).astype(float)
+    else:
+        stats["xg_coverage_flag"] = 0.0
+
+    cols_keep = [
         "web_name",
         "team_short",
-        "understat_xg",
-        "understat_xa",
-        "understat_npxg",
-        "understat_minutes",
-        "fotmob_xg",
-        "fotmob_xa",
-        "fotmob_minutes_recent",
-        "fotmob_starts_recent",
-        "fotmob_role",
-        "fotmob_availability",
+        "xg_per90",
+        "xa_per90",
+        "xgi_per90",
+        "xg_coverage_flag",
     ]
-    stats = stats[[c for c in keep_cols if c in stats.columns]]
-
-    # Compute a blended xG/xA and minutes
-    def compute_rates(row):
-        u_min = float(row.get("understat_minutes", 0.0))
-        f_min_recent = float(row.get("fotmob_minutes_recent", 0.0))
-
-        # Approximate "true" minutes: use Understat season minutes,
-        # but don't ignore recent FotMob data if Understat is low.
-        minutes = u_min
-        if f_min_recent > 0:
-            minutes = max(minutes, f_min_recent * 3.0)  # assume last ~3 matches window
-
-        minutes = max(minutes, 90.0)  # avoid crazy per-90 inflation
-
-        u_xg = float(row.get("understat_xg", 0.0))
-        u_xa = float(row.get("understat_xa", 0.0))
-        f_xg = float(row.get("fotmob_xg", 0.0))
-        f_xa = float(row.get("fotmob_xa", 0.0))
-
-        # Blend Understat (season) and FotMob (recent)
-        xg_total = 0.7 * u_xg + 0.3 * f_xg
-        xa_total = 0.7 * u_xa + 0.3 * f_xa
-
-        xg_per90 = xg_total / (minutes / 90.0) if minutes > 0 else 0.0
-        xa_per90 = xa_total / (minutes / 90.0) if minutes > 0 else 0.0
-        xgi_per90 = xg_per90 + xa_per90
-
-        # Coverage flag: 1 if we have meaningful minutes + xG/xA signal
-        coverage = 1.0 if (minutes >= 90.0 and (xg_total > 0 or xa_total > 0)) else 0.0
-
-        return pd.Series(
-            {
-                "xg_per90": xg_per90,
-                "xa_per90": xa_per90,
-                "xgi_per90": xgi_per90,
-                "xg_coverage_flag": coverage,
-            }
-        )
-
-    rates = stats.apply(compute_rates, axis=1)
-    stats = pd.concat([stats[["web_name", "team_short"]], rates], axis=1)
+    stats = stats[[c for c in cols_keep if c in stats.columns]]
 
     merged = players.merge(
         stats,
@@ -1452,7 +1555,7 @@ def augment_players_with_expected_stats(
         suffixes=("", "_exp"),
     )
 
-    # Fill missing with 0 / 0.0
+    # Fill missing with defaults
     for col, default in [
         ("xg_per90", 0.0),
         ("xa_per90", 0.0),
@@ -1464,8 +1567,9 @@ def augment_players_with_expected_stats(
         else:
             merged[col] = pd.to_numeric(merged[col], errors="coerce").fillna(default)
 
-    print("[expected_stats] Successfully merged expected-stats features into players.")
+    print("[expected_stats] Successfully merged FPL expected-stats into players.")
     return merged
+
 
 def main():
     print("=== FPL Prediction + Optimisation Engine (Auto-Mode) ===")
@@ -1476,8 +1580,10 @@ def main():
     data = fetch_bootstrap()
     fixtures = fetch_fixtures()
     players = build_players_df(data)
-    # Optionally augment with xG/xA data if xg_xa_latest.csv is present
-    players = augment_players_with_expected_stats(players, stats_path="expected_stats_latest.csv")
+    # Optionally augment with expected stats if expected_stats_latest.csv is present
+    players = augment_players_with_expected_stats(
+        players, stats_path="expected_stats_latest.csv"
+    )
 
     # -------------------------------------------------------
     # 2. Detect CURRENT and NEXT gameweek automatically
@@ -1494,7 +1600,7 @@ def main():
 
     # Planning GW: normally the NEXT GW (upcoming deadline)
     if next_gw is not None:
-        PLAN_GW = next_gw          # e.g. 13
+        PLAN_GW = next_gw  # e.g. 13
         BASIS_GW = max(1, PLAN_GW - 1)  # use previous GW squad as pre-deadline team
     else:
         PLAN_GW = current_gw
@@ -1523,8 +1629,12 @@ def main():
 
     OUTPUT_ALL_CSV = f"gw{pred_start}_to_gw{pred_end}_predictions_all.csv"
     OUTPUT_MYTEAM_CSV = f"gw{pred_start}_to_gw{pred_end}_predictions_myteam.csv"
-    OUTPUT_TRANSFERS_CSV = f"gw{pred_start}_to_gw{pred_end}_transfer_suggestions.csv"
-    OUTPUT_DOUBLE_CSV = f"gw{pred_start}_to_gw{pred_end}_double_transfers.csv"
+    OUTPUT_TRANSFERS_CSV = (
+        f"gw{pred_start}_to_gw{pred_end}_transfer_suggestions.csv"
+    )
+    OUTPUT_DOUBLE_CSV = (
+        f"gw{pred_start}_to_gw{pred_end}_double_transfers.csv"
+    )
     OUTPUT_MILP_PLAN_CSV = (
         f"gw{pred_start}_to_gw{pred_end}_multiGW_milp_plan.csv"
     )
@@ -1555,8 +1665,8 @@ def main():
         "team_short",
         "position",
         "price",
-        "multi_gw_points",          # raw total EP
-        "multi_gw_points_robust",   # robust (risk-adjusted) total EP
+        "multi_gw_points",  # raw total EP
+        "multi_gw_points_robust",  # robust (risk-adjusted) total EP
     ] + gw_cols + gw_cols_robust
 
     all_cols = base_cols + [
@@ -1744,7 +1854,7 @@ def main():
                 free_transfers_first_gw=FREE_TRANSFERS,
                 hit_cost=HIT_COST,
                 free_transfers_subsequent=1,  # normal FPL behaviour
-                max_extra_hits=8,              # "never more than –8"
+                max_extra_hits=8,  # "never more than –8"
                 max_per_team=3,
             )
 
@@ -1760,9 +1870,12 @@ def main():
             print(f"Multi-GW MILP optimiser failed with error: {e}")
 
     else:
-        print("\n⚠ No picks available for your GW. Could not build personalised view.")
+        print(
+            "\n⚠ No picks available for your GW. Could not build personalised view."
+        )
 
     print("\nDone.")
+
 
 if __name__ == "__main__":
     main()
