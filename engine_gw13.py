@@ -9,7 +9,6 @@ FREE_TRANSFERS = 1   # Change to 2 if you roll a FT!
 HIT_COST = 4         # Points lost per extra transfer
 MAX_ADDITIONAL_TRANSFERS = 2   # At most –8 points total hits (2 × 4 points)
 
-
 OUTPUT_ALL_CSV = None
 OUTPUT_MYTEAM_CSV = None
 OUTPUT_TRANSFERS_CSV = None
@@ -118,7 +117,6 @@ def build_players_df(data):
     vol = 0.5 * players["ga_per90"].fillna(0.0) + 0.5 * (
         players["form"] - players["points_per_game"]
     ).abs()
-    # Clip to avoid weird outliers, roughly 0–4
     players["volatility_score"] = vol.clip(0.0, 4.0)
     # ------------------------
 
@@ -256,7 +254,7 @@ def build_fixture_difficulty_df(fixtures, gw, team_model, base_lambda=1.4):
                 "lambda_for": lam_home,
                 "lambda_against": lam_away,
                 "scoring_factor": lam_home / base_lambda,
-                "cs_prob": float(np.exp(-lam_away)),  # P(0 goals against) under Poisson
+                "cs_prob": float(np.exp(-lam_away)),  # P(0 goals against)
             }
         )
         # Away side record
@@ -273,7 +271,6 @@ def build_fixture_difficulty_df(fixtures, gw, team_model, base_lambda=1.4):
         )
 
     df = pd.DataFrame(rows)
-    # One row per team in that GW
     df = df.groupby("team_id", as_index=False).first()
     return df
 
@@ -346,7 +343,7 @@ def base_ep_from_poisson(row):
     else:
         involvement = ga90
 
-    # Position-specific scoring factors (tuned slightly)
+    # Position-specific scoring factors
     if pos in ("FWD",):
         goal_factor = 4.0
         assist_factor = 3.0
@@ -369,16 +366,16 @@ def base_ep_from_poisson(row):
 
     atk_points = expected_goals * goal_factor + expected_assists * assist_factor
 
-    # Clean sheet component – slightly nerfed vs raw FPL to avoid DEF dominance
+    # Clean sheet component
     cs_points = 0.0
     if pos in ("DEF", "GKP", "GK"):
-        cs_points = cs_prob * 3.5  # was 4.0
+        cs_points = cs_prob * 3.5
     elif pos == "MID":
-        cs_points = cs_prob * 0.8  # was 1.0
+        cs_points = cs_prob * 0.8
 
-    defence_penalty = max(0.0, (lam_against - 1.2)) * 0.4  # slightly softer
+    defence_penalty = max(0.0, (lam_against - 1.2)) * 0.4
 
-    # Mild form/PPG bump so elite attackers aren't crushed by volatility
+    # Mild form/PPG bump
     form = float(row.get("form", 0.0) or 0.0)
     ppg = float(row.get("points_per_game", 0.0) or 0.0)
     form_boost = 0.05 * form + 0.03 * ppg
@@ -402,19 +399,14 @@ def predict_gw_points(players, fixture_df):
     preds["scoring_factor"] = preds["scoring_factor"].fillna(1.0).clip(0.6, 1.4)
     preds["cs_prob"] = preds["cs_prob"].fillna(0.0).clip(0.0, 1.0)
 
-    # Ensure volatility score exists
     preds["volatility_score"] = preds.get("volatility_score", 0.0).fillna(0.0)
 
-    # Minutes factor = probability and share of playing time
     preds["minutes_multiplier"] = preds.apply(minutes_factor, axis=1)
 
-    # Base EP for a full match from Poisson-style model
     preds["base_ep"] = preds.apply(base_ep_from_poisson, axis=1)
 
-    # Final predicted points (raw)
     preds["predicted_points"] = preds["base_ep"] * preds["minutes_multiplier"]
 
-    # Robust EP: penalise volatility
     alpha = ROBUST_ALPHA
     preds["robust_predicted_points"] = (
         preds["predicted_points"] - alpha * preds["volatility_score"]
@@ -471,7 +463,6 @@ def multi_gw_predictions(players, fixtures, start_gw, num_gws):
         total_raw += results[colname]
         total_robust += results[robust_colname]
 
-        # drop temporary columns before next GW
         results = results.drop(columns=["predicted_points", "robust_predicted_points"])
 
     results["multi_gw_points"] = total_raw
@@ -520,11 +511,7 @@ def suggest_best_single_transfers_multi_gw(
     min_ppg: float = 0.0,
 ):
     """1-transfer optimiser (multi GW), enforcing max 3 per club.
-       Uses robust EP if available.
-
-       Now with safety filters:
-         - Excludes players with very low minutes / ownership.
-         - Optional form/PPG floors.
+       Uses robust EP if available. Includes safety filters.
     """
     if myteam.empty:
         return None
@@ -536,11 +523,8 @@ def suggest_best_single_transfers_multi_gw(
     )
 
     bank = (bank_tenths or 0) / 10.0
-
-    # Make a copy so we don't mutate preds_all
     candidates_all = preds_all.copy()
 
-    # Ensure numeric columns
     candidates_all["minutes"] = pd.to_numeric(
         candidates_all.get("minutes", 0), errors="coerce"
     ).fillna(0)
@@ -554,7 +538,6 @@ def suggest_best_single_transfers_multi_gw(
         candidates_all.get("points_per_game", 0.0), errors="coerce"
     ).fillna(0.0)
 
-    # === GLOBAL SAFETY FILTERS ===
     candidates_all = candidates_all[
         (candidates_all["minutes"] >= min_minutes)
         & (candidates_all["selected_by_percent"] >= min_selected_by)
@@ -562,7 +545,6 @@ def suggest_best_single_transfers_multi_gw(
         & (candidates_all["points_per_game"] >= min_ppg)
     ]
 
-    # Rank globally by chosen EP metric
     candidates_all = candidates_all.sort_values(metric, ascending=False)
 
     club_counts = myteam["team_short"].value_counts().to_dict()
@@ -580,11 +562,9 @@ def suggest_best_single_transfers_multi_gw(
 
         max_price = sell_price + bank
 
-        # Simulate selling this player
         club_counts_post_sell = club_counts.copy()
         club_counts_post_sell[sell_team] = club_counts_post_sell.get(sell_team, 1) - 1
 
-        # Filter pool by constraints
         pool = candidates_all[
             (candidates_all["position"] == pos)
             & (candidates_all["id"] != current_id)
@@ -638,25 +618,11 @@ def suggest_best_double_transfers_multi_gw(
     max_candidates_per_position=25,
 ):
     """
-    Hybrid 2-transfer optimiser (multi-GW):
-
-    - Uses robust metric if available: multi_gw_points_robust, else multi_gw_points.
-    - Brute-force over pairs of SELL players from your squad.
-    - For each pair, searches among top N candidates per position.
-    - Enforces:
-        * budget (sell prices + bank)
-        * 3-per-club limit
-        * same positions as the sold players
-        * only 'a' or 'd' status (available/doubtful)
-    - Applies hit cost based on free_transfers and hit_cost.
-
-    Returns:
-        DataFrame sorted by net_gain (best first), or None if no profitable combos.
+    Hybrid 2-transfer optimiser (multi-GW), with safety filters.
     """
     if myteam.empty or len(myteam) < 2:
         return None
 
-    # Use robust metric if present, otherwise raw
     metric = (
         "multi_gw_points_robust"
         if "multi_gw_points_robust" in preds_all.columns
@@ -664,11 +630,8 @@ def suggest_best_double_transfers_multi_gw(
     )
 
     bank = (bank_tenths or 0) / 10.0
-
-    # Sort global candidates by chosen metric
     candidates_all = preds_all.sort_values(metric, ascending=False).copy()
 
-    # === NEW: safety filters for candidates ===
     candidates_all["minutes"] = pd.to_numeric(
         candidates_all.get("minutes", 0), errors="coerce"
     ).fillna(0)
@@ -694,14 +657,12 @@ def suggest_best_double_transfers_multi_gw(
         & (candidates_all["points_per_game"] >= MIN_PPG)
     ]
 
-    # Build per-position candidate pools, capped in size for speed
     pos_top = {}
     for pos in ["GKP", "GK", "DEF", "MID", "FWD"]:
         pos_df = candidates_all[candidates_all["position"] == pos]
         if not pos_df.empty:
             pos_top[pos] = pos_df.head(max_candidates_per_position).copy()
 
-    # Current club counts in your squad
     club_counts = myteam["team_short"].value_counts().to_dict()
     suggestions = []
 
@@ -714,17 +675,13 @@ def suggest_best_double_transfers_multi_gw(
             row2 = team_df.iloc[j]
 
             pos1, pos2 = row1["position"], row2["position"]
-
-            # Skip if we don't have candidates for one of the positions
             if pos1 not in pos_top or pos2 not in pos_top:
                 continue
 
-            # Current projected points for the two players being sold
             current_pred1 = float(row1.get(metric, 0.0))
             current_pred2 = float(row2.get(metric, 0.0))
             current_points = current_pred1 + current_pred2
 
-            # Selling prices (fallback to now price if missing)
             sell_price1 = row1.get("sell_price", np.nan)
             sell_price2 = row2.get("sell_price", np.nan)
             if pd.isna(sell_price1):
@@ -734,7 +691,6 @@ def suggest_best_double_transfers_multi_gw(
 
             total_budget = sell_price1 + sell_price2 + bank
 
-            # Club counts after selling these two
             cc_after_sell = club_counts.copy()
             cc_after_sell[row1["team_short"]] = cc_after_sell.get(
                 row1["team_short"], 1
@@ -743,36 +699,29 @@ def suggest_best_double_transfers_multi_gw(
                 row2["team_short"], 1
             ) - 1
 
-            # Build candidate pools for each position
             pool1 = pos_top[pos1].copy()
             pool2 = pos_top[pos2].copy()
 
-            # Exclude the players we're selling
             pool1 = pool1[pool1["id"] != row1["id"]]
             pool2 = pool2[pool2["id"] != row2["id"]]
 
-            # Only consider available or doubtful players
             pool1 = pool1[pool1["status"].isin(["a", "d"])]
             pool2 = pool2[pool2["status"].isin(["a", "d"])]
 
             if pool1.empty or pool2.empty:
                 continue
 
-            # Hybrid search: iterate over all pairs in the trimmed pools
             for _, buy1 in pool1.iterrows():
                 for _, buy2 in pool2.iterrows():
-                    # Can't buy the same player twice
                     if buy1["id"] == buy2["id"]:
                         continue
 
                     price1 = float(buy1["price"])
                     price2 = float(buy2["price"])
 
-                    # Budget constraint
                     if price1 + price2 > total_budget + 1e-6:
                         continue
 
-                    # 3-per-club constraint after transfers
                     tmp_counts = cc_after_sell.copy()
                     t1 = buy1["team_short"]
                     t2 = buy2["team_short"]
@@ -782,7 +731,6 @@ def suggest_best_double_transfers_multi_gw(
                     if max(tmp_counts.values()) > 3:
                         continue
 
-                    # Projected points for the two incoming players
                     new_points = float(buy1.get(metric, 0.0)) + float(
                         buy2.get(metric, 0.0)
                     )
@@ -790,7 +738,6 @@ def suggest_best_double_transfers_multi_gw(
                     if gain <= 0:
                         continue
 
-                    # Hit cost: extra transfers beyond free_transfers
                     n_transfers = 2
                     extra_transfers = max(0, n_transfers - free_transfers)
                     hit_points = extra_transfers * hit_cost
@@ -836,16 +783,9 @@ def optimise_wildcard_squad_milp(preds_all, total_budget_m, max_per_team=3):
     """
     MILP: choose the best 15-man squad (2 GKP, 5 DEF, 5 MID, 3 FWD)
     within a given budget using robust multi-GW points.
-
-    - preds_all: DataFrame with at least:
-        ["id", "web_name", "team_short", "position", "price",
-         "multi_gw_points_robust" or "multi_gw_points"]
-    - total_budget_m: budget in millions (float), e.g. 100.0
     """
-
     df = preds_all.copy()
 
-    # Use robust EP if available, otherwise raw
     metric = (
         "multi_gw_points_robust"
         if "multi_gw_points_robust" in df.columns
@@ -856,7 +796,6 @@ def optimise_wildcard_squad_milp(preds_all, total_budget_m, max_per_team=3):
             "Expected multi_gw_points(_robust) in preds_all for MILP optimiser."
         )
 
-    # Basic cleaning
     df = df.dropna(subset=[metric, "price", "position", "team_short"])
     df.reset_index(drop=True, inplace=True)
 
@@ -865,48 +804,36 @@ def optimise_wildcard_squad_milp(preds_all, total_budget_m, max_per_team=3):
         print("No players available for MILP optimisation.")
         return None
 
-    # Position requirements (standard FPL)
     POS_REQ = {
         "GKP": 2,
-        "GK": 2,  # in case goalkeeper is labelled GK
+        "GK": 2,
         "DEF": 5,
         "MID": 5,
         "FWD": 3,
     }
 
-    # --- Define the MILP problem ---
     prob = LpProblem("FPL_Wildcard_MILP", LpMaximize)
-
-    # Binary decision variable x_i: 1 if player i is in the final squad
     x = [LpVariable(f"x_{i}", lowBound=0, upBound=1, cat="Binary") for i in range(n)]
 
-    # --- Objective: maximise total robust expected points ---
     prob += lpSum(df[metric].iloc[i] * x[i] for i in range(n)), "Total_Robust_EP"
-
-    # --- Constraint: total players = 15 ---
     prob += lpSum(x) == 15, "TotalPlayers"
 
-    # --- Constraints: position counts ---
     for pos, req in POS_REQ.items():
         idx = df[df["position"] == pos].index.tolist()
         if pos in ("GKP", "GK"):
-            # Treat GK and GKP as the same pool
             idx = df[df["position"].isin(["GKP", "GK"])].index.tolist()
         if not idx:
             continue
         prob += lpSum(x[i] for i in idx) == req, f"Pos_{pos}"
 
-    # --- Constraint: max 3 players per team ---
     for team in df["team_short"].unique():
         idx = df[df["team_short"] == team].index.tolist()
         prob += lpSum(x[i] for i in idx) <= max_per_team, f"Team_{team}_limit"
 
-    # --- Constraint: budget ---
     prob += (
         lpSum(df["price"].iloc[i] * x[i] for i in range(n)) <= total_budget_m
     ), "Budget"
 
-    # --- Solve ---
     prob.solve()
 
     if LpStatus[prob.status] != "Optimal":
@@ -917,7 +844,6 @@ def optimise_wildcard_squad_milp(preds_all, total_budget_m, max_per_team=3):
     squad = df.iloc[chosen_idx].copy()
     squad = squad.sort_values(["position", metric], ascending=[True, False])
 
-    # Add some summary columns
     squad["selected_metric"] = metric
     squad["budget"] = total_budget_m
     squad["total_metric"] = squad[metric].sum()
@@ -937,27 +863,14 @@ def optimise_transfers_milp(
     max_per_team=3,
 ):
     """
-    MILP transfer optimiser.
-
-    Decide which players to keep / sell / buy to form the best final 15-man squad
-    (2 GK, 5 DEF, 5 MID, 3 FWD) subject to:
-      - Budget (current squad value + bank)
-      - Max 3 per team
-      - Limited number of transfers with hit cost
-
-    Uses multi_gw_points_robust if present, otherwise multi_gw_points.
-
-    Returns:
-      final_squad_df, transfers_df  (or (None, None) if no solution)
+    MILP transfer optimiser (single-horizon).
     """
-
     if preds_myteam is None or preds_myteam.empty:
         print("No current team data for MILP transfers.")
         return None, None
 
     df = preds_all.copy()
 
-    # Use robust EP if available, otherwise raw
     metric = (
         "multi_gw_points_robust"
         if "multi_gw_points_robust" in df.columns
@@ -968,10 +881,8 @@ def optimise_transfers_milp(
             "Expected multi_gw_points or multi_gw_points_robust in preds_all."
         )
 
-    # Only consider playable players (a = available, d = doubt)
     df = df[df["status"].isin(["a", "d"])].copy()
 
-    # We need these columns
     required_cols = ["id", "team_short", "position", "price", "owned"]
     for c in required_cols:
         if c not in df.columns:
@@ -979,68 +890,53 @@ def optimise_transfers_milp(
                 f"MILP transfer optimiser needs column '{c}' in preds_all."
             )
 
-    # If sell_price missing, fall back to price
     if "sell_price" not in df.columns:
         df["sell_price"] = df["price"]
 
-    # Clean + reset index
     df.reset_index(drop=True, inplace=True)
     n = len(df)
     if n == 0:
         print("No players available for MILP transfers.")
         return None, None
 
-    # Position requirements
     POS_REQ = {
         "GKP": 2,
-        "GK": 2,  # handle GK vs GKP naming
+        "GK": 2,
         "DEF": 5,
         "MID": 5,
         "FWD": 3,
     }
 
-    # Budget in millions: current squad value + bank
     if value_tenths is None or bank_tenths is None:
         total_budget_m = 100.0
     else:
         total_budget_m = (value_tenths + bank_tenths) / 10.0
 
-    # Indices by ownership
     owned_mask = df["owned"].astype(bool)
     idx_owned = df[owned_mask].index.tolist()
     idx_not_owned = df[~owned_mask].index.tolist()
 
-    # --- Define the MILP problem ---
     prob = LpProblem("FPL_Transfers_MILP", LpMaximize)
 
-    # Decision variable: x[i] = 1 if player i is in the final squad
     x = [LpVariable(f"x_{i}", lowBound=0, upBound=1, cat="Binary") for i in range(n)]
 
-    # out[i] for currently owned players: 1 if we sell them
     out = {
         i: LpVariable(f"out_{i}", lowBound=0, upBound=1, cat="Binary")
         for i in idx_owned
     }
-
-    # in[j] for not-owned players: 1 if we buy them
     _in = {
         j: LpVariable(f"in_{j}", lowBound=0, upBound=1, cat="Binary")
         for j in idx_not_owned
     }
 
-    # extra transfers beyond free_transfers
     extra = LpVariable("extra_transfers", lowBound=0, cat="Integer")
 
-    # --- Objective: maximise total robust EP minus hit cost ---
     prob += (
         lpSum(df[metric].iloc[i] * x[i] for i in range(n)) - hit_cost * extra
     ), "Total_Robust_EP_minus_Hits"
 
-    # --- Squad size: 15 players ---
     prob += lpSum(x) == 15, "TotalPlayers"
 
-    # --- Position constraints ---
-    # GK/GKP combined handling
     gk_idx = df[df["position"].isin(["GK", "GKP"])].index.tolist()
     if gk_idx:
         prob += lpSum(x[i] for i in gk_idx) == 2, "GK_Count"
@@ -1050,45 +946,35 @@ def optimise_transfers_milp(
         if idx_pos:
             prob += lpSum(x[i] for i in idx_pos) == POS_REQ[pos], f"{pos}_Count"
 
-    # --- Max 3 per team ---
     for team in df["team_short"].unique():
         idx_team = df[df["team_short"] == team].index.tolist()
         prob += lpSum(x[i] for i in idx_team) <= max_per_team, f"Team_{team}_Limit"
 
-    # --- Ownership flow constraints ---
-    # For owned players: either kept (x=1) or sold (out=1)
     for i in idx_owned:
         prob += x[i] + out[i] == 1, f"Owned_keep_or_sell_{i}"
 
-    # For not-owned players: if in final squad, must be bought (x == in)
     for j in idx_not_owned:
         prob += x[j] - _in[j] <= 0, f"NotOwned_in_if_selected1_{j}"
         prob += _in[j] - x[j] <= 0, f"NotOwned_in_if_selected2_{j}"
 
-    # Transfers in and out must balance
     prob += (
         lpSum(_in[j] for j in idx_not_owned)
         == lpSum(out[i] for i in idx_owned)
     ), "Buy_Sell_Balance"
 
-    # Total transfers
     total_transfers = lpSum(_in[j] for j in idx_not_owned)
 
-    # Limit total transfers to free + max_additional_transfers
     prob += (
         total_transfers <= free_transfers + max_additional_transfers
     ), "MaxTransfers"
 
-    # extra >= transfers - free_transfers, extra >= 0
     prob += extra >= total_transfers - free_transfers, "ExtraTransfersLowerBound"
     prob += extra >= 0, "ExtraTransfersNonNeg"
 
-    # --- Budget constraint ---
     prob += (
         lpSum(df["price"].iloc[i] * x[i] for i in range(n)) <= total_budget_m
     ), "Budget"
 
-    # --- Solve ---
     prob.solve()
 
     if LpStatus[prob.status] != "Optimal":
@@ -1097,15 +983,12 @@ def optimise_transfers_milp(
         )
         return None, None
 
-    # Build final squad
     chosen_idx = [i for i in range(n) if x[i].value() == 1]
     final_squad = df.iloc[chosen_idx].copy()
     final_squad = final_squad.sort_values(["position", metric], ascending=[True, False])
 
-    # Build transfers dataframe
     transfers = []
 
-    # Sold players (out=1)
     for i in idx_owned:
         if out[i].value() >= 0.5:
             row = df.iloc[i]
@@ -1120,7 +1003,6 @@ def optimise_transfers_milp(
                 }
             )
 
-    # Bought players (in=1)
     for j in idx_not_owned:
         if _in[j].value() >= 0.5:
             row = df.iloc[j]
@@ -1137,7 +1019,6 @@ def optimise_transfers_milp(
 
     transfers_df = pd.DataFrame(transfers)
 
-    # Add some summary info to final_squad
     final_squad["selected_metric"] = metric
     final_squad["total_metric"] = final_squad[metric].sum()
     final_squad["total_price"] = final_squad["price"].sum()
@@ -1160,39 +1041,14 @@ def optimise_transfers_milp_multi_horizon(
     max_per_team=3,
 ):
     """
-    Multi-GW MILP transfer optimiser (sliding horizon, Path B).
-
-    Plans transfers over a horizon of num_gws starting at plan_gw:
-      GWs = [plan_gw, plan_gw+1, ..., plan_gw+num_gws-1]
-
-    Decision variables:
-      - x[i,g]   : 1 if player i is in your squad AFTER GW g (g=0..G)
-      - in[i,g]  : 1 if player i is bought for GW g (g=1..G)
-      - out[i,g] : 1 if player i is sold for GW g (g=1..G)
-      - extra_g  : extra transfers for GW g beyond free transfers
-
-    g=0 is your current squad (pre-plan); x[i,0] is fixed by 'owned'.
-
-    Objective:
-      maximise sum_g ( robust points for that GW * x[i,g] ) - hit_cost * sum_g extra_g
-
-    Constraints:
-      - Squad always 15 players each GW, with correct position counts
-      - Max 3 per club each GW
-      - Total squad price each GW <= (value + bank) in millions
-      - Transfer flow: x[i,g] = x[i,g-1] + in[i,g] - out[i,g]
-      - Transfers_g = sum(in[i,g]) = sum(out[i,g])
-      - extra_g >= transfers_g - free_transfers_g
-      - Sum of all extra_g <= max_extra_hits / hit_cost
+    Multi-GW MILP transfer optimiser (sliding horizon).
     """
-
     if preds_myteam is None or preds_myteam.empty:
         print("No current team data for multi-GW MILP transfers.")
         return None, None
 
     df = preds_all.copy()
 
-    # --------- choose per-GW scoring columns ----------
     horizon_gws = [plan_gw + k for k in range(num_gws)]
     gw_metric_cols = {}
 
@@ -1209,16 +1065,12 @@ def optimise_transfers_milp_multi_horizon(
                 f"(expected {robust_col} or {raw_col})."
             )
 
-    # Only consider available / doubtful players
     df = df[df["status"].isin(["a", "d"])].copy()
 
-    required_cols = ["id", "team_short", "position", "price", "owned"]
+    required_cols = ["id", "team_short", "position", "price", "owned", "sell_price"]
     for c in required_cols:
         if c not in df.columns:
             raise ValueError(f"multi-GW MILP needs column '{c}' in preds_all.")
-
-    if "sell_price" not in df.columns:
-        df["sell_price"] = df["price"]
 
     df.reset_index(drop=True, inplace=True)
     n = len(df)
@@ -1226,10 +1078,8 @@ def optimise_transfers_milp_multi_horizon(
         print("No players available for multi-GW MILP transfers.")
         return None, None
 
-    # Position requirements
     POS_REQ = {"GKP": 2, "GK": 2, "DEF": 5, "MID": 5, "FWD": 3}
 
-    # Budget (millions)
     if value_tenths is None or bank_tenths is None:
         total_budget_m = 100.0
     else:
@@ -1238,18 +1088,15 @@ def optimise_transfers_milp_multi_horizon(
     owned_mask = df["owned"].astype(bool)
     idx_owned = df[owned_mask].index.tolist()
 
-    # ------------- set up MILP -------------
-    G = len(horizon_gws)  # number of future GWs (1..G)
+    G = len(horizon_gws)
 
     prob = LpProblem("FPL_Transfers_MultiGW_MILP", LpMaximize)
 
-    # Binary squad variable x[i,g], g=0..G (g=0 is pre-plan squad)
     x = {}
     for i in range(n):
         for g in range(G + 1):
             x[(i, g)] = LpVariable(f"x_{i}_{g}", lowBound=0, upBound=1, cat="Binary")
 
-    # Transfers in/out for each GW (g=1..G)
     in_var = {}
     out_var = {}
     for i in range(n):
@@ -1261,13 +1108,11 @@ def optimise_transfers_milp_multi_horizon(
                 f"out_{i}_{g}", lowBound=0, upBound=1, cat="Binary"
             )
 
-    # Extra transfers (beyond free) per GW
     extra_g = {
         g: LpVariable(f"extra_transfers_{g}", lowBound=0, cat="Integer")
         for g in range(1, G + 1)
     }
 
-    # -------- objective: sum over GWs of EP - hit cost on all extra transfers ----------
     obj_terms = []
     for g_idx, gw in enumerate(horizon_gws, start=1):
         col = gw_metric_cols[gw]
@@ -1277,35 +1122,26 @@ def optimise_transfers_milp_multi_horizon(
     obj_hits = hit_cost * lpSum(extra_g[g] for g in range(1, G + 1))
     prob += lpSum(obj_terms) - obj_hits, "Total_Robust_EP_minus_Hits_MultiGW"
 
-    # -------- baseline squad at g=0 must be your current squad ----------
     for i in range(n):
         prob += x[(i, 0)] == (1.0 if i in idx_owned else 0.0), f"BaselineSquad_{i}"
 
-    # -------- squad evolution + transfer counts per GW ----------
     for g in range(1, G + 1):
-
-        # Flow: x[i,g] = x[i,g-1] + in - out
         for i in range(n):
             prob += (
                 x[(i, g)] == x[(i, g - 1)] + in_var[(i, g)] - out_var[(i, g)]
             ), f"Flow_{i}_{g}"
 
-        # Transfers in/out must balance
         prob += (
             lpSum(in_var[(i, g)] for i in range(n))
             == lpSum(out_var[(i, g)] for i in range(n))
         ), f"BuySellBalance_{g}"
 
         transfers_g = lpSum(in_var[(i, g)] for i in range(n))
-
-        # Free transfers this GW
         free_g = free_transfers_first_gw if g == 1 else free_transfers_subsequent
 
-        # extra_g >= transfers_g - free_g
         prob += extra_g[g] >= transfers_g - free_g, f"ExtraLB_{g}"
         prob += extra_g[g] >= 0, f"ExtraNonNeg_{g}"
 
-    # Cap total extra transfers converted to hits
     max_extra_transfers_total = (
         max_extra_hits / float(hit_cost) if hit_cost > 0 else 0.0
     )
@@ -1313,24 +1149,17 @@ def optimise_transfers_milp_multi_horizon(
         lpSum(extra_g[g] for g in range(1, G + 1)) <= max_extra_transfers_total
     ), "MaxExtraTransfersTotal"
 
-    # -------- squad composition + budget each GW ----------
     teams = df["team_short"].unique().tolist()
-
-    # Precompute index sets
     gk_idx = df[df["position"].isin(["GK", "GKP"])].index.tolist()
     pos_idx = {pos: df[df["position"] == pos].index.tolist() for pos in ["DEF", "MID", "FWD"]}
     team_idx = {team: df[df["team_short"] == team].index.tolist() for team in teams}
 
     for g in range(1, G + 1):
-
-        # 15-man squad
         prob += lpSum(x[(i, g)] for i in range(n)) == 15, f"TotalPlayers_{g}"
 
-        # GK count
         if gk_idx:
             prob += lpSum(x[(i, g)] for i in gk_idx) == 2, f"GK_Count_{g}"
 
-        # DEF/MID/FWD counts
         for pos in ["DEF", "MID", "FWD"]:
             idx_pos = pos_idx[pos]
             if idx_pos:
@@ -1338,26 +1167,22 @@ def optimise_transfers_milp_multi_horizon(
                     lpSum(x[(i, g)] for i in idx_pos) == POS_REQ[pos]
                 ), f"{pos}_Count_{g}"
 
-        # Max 3 per club
         for team in teams:
             idx_team = team_idx[team]
             prob += (
                 lpSum(x[(i, g)] for i in idx_team) <= max_per_team
             ), f"Team_{team}_Limit_{g}"
 
-        # Budget per GW
         prob += (
             lpSum(df["price"].iloc[i] * x[(i, g)] for i in range(n)) <= total_budget_m
         ), f"Budget_{g}"
 
-    # -------- solve ----------
     prob.solve()
 
     if LpStatus[prob.status] != "Optimal":
         print(f"Multi-GW MILP: no optimal solution (status={LpStatus[prob.status]}).")
         return None, None
 
-    # -------- build results: squads & transfers per GW ----------
     squads_by_gw = {}
     for g_idx, gw in enumerate(horizon_gws, start=1):
         chosen_idx = [i for i in range(n) if x[(i, g_idx)].value() >= 0.5]
@@ -1369,7 +1194,6 @@ def optimise_transfers_milp_multi_horizon(
 
     transfers_rows = []
     for g_idx, gw in enumerate(horizon_gws, start=1):
-        # buys
         for i in range(n):
             if in_var[(i, g_idx)].value() >= 0.5:
                 row = df.iloc[i]
@@ -1384,7 +1208,6 @@ def optimise_transfers_milp_multi_horizon(
                         "price": float(row["price"]),
                     }
                 )
-        # sells
         for i in range(n):
             if out_var[(i, g_idx)].value() >= 0.5:
                 row = df.iloc[i]
@@ -1410,15 +1233,10 @@ def optimise_transfers_milp_multi_horizon(
 def generate_email_summary(preds_myteam, preds_all, single_df, double_df, milp_squad):
     """
     Build a clean, human-readable summary for the email body.
-    Returns a multi-line string.
     """
-
     lines = []
     lines.append("=== FPL Engine Summary ===\n")
 
-    # ------------------------------------------
-    # 1. Captain suggestion
-    # ------------------------------------------
     if not preds_myteam.empty:
         cap_metric = (
             "multi_gw_points_robust"
@@ -1431,9 +1249,6 @@ def generate_email_summary(preds_myteam, preds_all, single_df, double_df, milp_s
     else:
         lines.append("⭐ Captain: No data available\n")
 
-    # ------------------------------------------
-    # 2. Single-transfer suggestion
-    # ------------------------------------------
     if single_df is not None and not single_df.empty:
         best = single_df.iloc[0]
         lines.append("🔁 Best Single Transfer:")
@@ -1443,9 +1258,6 @@ def generate_email_summary(preds_myteam, preds_all, single_df, double_df, milp_s
     else:
         lines.append("🔁 Best Single Transfer: None found\n")
 
-    # ------------------------------------------
-    # 3. Double-transfer suggestion
-    # ------------------------------------------
     if double_df is not None and not double_df.empty:
         best2 = double_df.sort_values("net_gain", ascending=False).iloc[0]
         lines.append("🔁 Best Double Transfer:")
@@ -1454,9 +1266,6 @@ def generate_email_summary(preds_myteam, preds_all, single_df, double_df, milp_s
     else:
         lines.append("🔁 Best Double Transfer: None found\n")
 
-    # ------------------------------------------
-    # 4. MILP Full Squad Summary
-    # ------------------------------------------
     if milp_squad is not None and not milp_squad.empty:
         metric = milp_squad["selected_metric"].iloc[0]
         total = milp_squad["total_metric"].iloc[0]
@@ -1479,21 +1288,10 @@ def augment_players_with_expected_stats(
     Augment the players DataFrame with FPL-based expected stats
     from the pre-built CSV `expected_stats_latest.csv`.
 
-    CSV is produced by the GitHub Actions step and is expected
-    to contain (at least):
-
-        web_name, team_short,
-        minutes, xg, xa, xgi,
-        xg_per90, xa_per90, xgi_per90
-
-    We compute:
-        - xg_per90 / xa_per90 / xgi_per90 if missing
-        - xg_coverage_flag = 1 if minutes >= 300 and xgi_per90 > 0
-        - Shrunk/modelled per-90 stats to avoid tiny-sample explosions:
-            xg_per90_model, xa_per90_model, xgi_per90_model
-
-    If the file is missing or malformed, we fall back gracefully
-    and return players with zero xG/assist features.
+    Adds:
+      xg_per90, xa_per90, xgi_per90,
+      xg_coverage_flag,
+      xg_per90_model, xa_per90_model, xgi_per90_model (shrunk/capped).
     """
     try:
         stats = pd.read_csv(stats_path)
@@ -1506,7 +1304,6 @@ def augment_players_with_expected_stats(
         players["xa_per90"] = 0.0
         players["xgi_per90"] = 0.0
         players["xg_coverage_flag"] = 0.0
-        # No modelled stats in fallback
         players["xg_per90_model"] = 0.0
         players["xa_per90_model"] = 0.0
         players["xgi_per90_model"] = 0.0
@@ -1522,12 +1319,10 @@ def augment_players_with_expected_stats(
         players["xgi_per90_model"] = 0.0
         return players
 
-    # Normalise numeric columns
     for col in ["minutes", "xg", "xa", "xgi", "xg_per90", "xa_per90", "xgi_per90"]:
         if col in stats.columns:
             stats[col] = pd.to_numeric(stats[col], errors="coerce").fillna(0.0)
 
-    # If per90 columns are missing but totals exist, compute them
     if "xgi_per90" not in stats.columns or stats["xgi_per90"].sum() == 0:
         if {"xg", "xa", "minutes"}.issubset(stats.columns):
             minutes = stats["minutes"].replace(0, np.nan)
@@ -1545,7 +1340,6 @@ def augment_players_with_expected_stats(
             stats["xa_per90"] = 0.0
             stats["xgi_per90"] = 0.0
 
-    # Coverage flag: reasonable minutes + some xGI signal
     if "minutes" in stats.columns and "xgi_per90" in stats.columns:
         stats["xg_coverage_flag"] = (
             (stats["minutes"] >= 300) & (stats["xgi_per90"] > 0)
@@ -1553,37 +1347,31 @@ def augment_players_with_expected_stats(
     else:
         stats["xg_coverage_flag"] = 0.0
 
-    # -------- NEW: MINUTES-BASED SHRINKAGE & MODELLED PER-90 STATS --------
+    # --- MINUTES-BASED SHRINKAGE & MODELLED PER-90 STATS ---
     if "minutes" in stats.columns and "xgi_per90" in stats.columns:
-        MINUTES_PRIOR = 900.0  # ~10 full matches
+        MINUTES_PRIOR = 900.0
 
         total_minutes = float(stats["minutes"].sum())
-        # If we have xgi totals, use them; otherwise approximate from xgi_per90
         if "xgi" in stats.columns and stats["xgi"].sum() > 0 and total_minutes > 0:
             total_xgi = float(stats["xgi"].sum())
             league_xgi_per90 = total_xgi / (total_minutes / 90.0)
         elif total_minutes > 0:
-            # Fallback: average of existing xgi_per90
             league_xgi_per90 = float(stats["xgi_per90"].mean())
         else:
-            league_xgi_per90 = 0.25  # very rough fallback
+            league_xgi_per90 = 0.25
 
         minutes = stats["minutes"].clip(lower=0.0)
         weight = minutes / (minutes + MINUTES_PRIOR)
 
-        # Shrunk xGI/90 toward league average
         stats["xgi_per90_shrunk"] = league_xgi_per90 + weight * (
             stats["xgi_per90"] - league_xgi_per90
         )
 
-        # Split xGI into xG/xA proportions using original xg/xa if available
         if "xg" in stats.columns and "xa" in stats.columns and "xgi" in stats.columns:
-            # Avoid division by zero
             denom = stats["xgi"].replace(0, 1e-6)
             xg_prop = stats["xg"] / denom
             xa_prop = stats["xa"] / denom
         else:
-            # Fallback: use existing per90 split
             denom = stats["xgi_per90"].replace(0, 1e-6)
             xg_prop = stats["xg_per90"] / denom
             xa_prop = stats["xa_per90"] / denom
@@ -1591,7 +1379,6 @@ def augment_players_with_expected_stats(
         stats["xg_per90_shrunk"] = stats["xgi_per90_shrunk"] * xg_prop
         stats["xa_per90_shrunk"] = stats["xgi_per90_shrunk"] * xa_prop
 
-        # Clip extremes to keep things realistic
         stats["xgi_per90_model"] = stats["xgi_per90_shrunk"].clip(upper=1.00)
         stats["xg_per90_model"] = stats["xg_per90_shrunk"].clip(upper=0.70)
         stats["xa_per90_model"] = stats["xa_per90_shrunk"].clip(upper=0.70)
@@ -1599,7 +1386,7 @@ def augment_players_with_expected_stats(
         stats["xgi_per90_model"] = 0.0
         stats["xg_per90_model"] = 0.0
         stats["xa_per90_model"] = 0.0
-    # ----------------------------------------------------------------------
+    # -------------------------------------------------------
 
     cols_keep = [
         "web_name",
@@ -1621,7 +1408,6 @@ def augment_players_with_expected_stats(
         suffixes=("", "_exp"),
     )
 
-    # Fill missing with defaults
     for col, default in [
         ("xg_per90", 0.0),
         ("xa_per90", 0.0),
@@ -1644,20 +1430,13 @@ def augment_players_with_expected_stats(
 def main():
     print("=== FPL Prediction + Optimisation Engine (Auto-Mode) ===")
 
-    # -------------------------------------------------------
-    # 1. Load core data
-    # -------------------------------------------------------
     data = fetch_bootstrap()
     fixtures = fetch_fixtures()
     players = build_players_df(data)
-    # Optionally augment with expected stats if expected_stats_latest.csv is present
     players = augment_players_with_expected_stats(
         players, stats_path="expected_stats_latest.csv"
     )
 
-    # -------------------------------------------------------
-    # 2. Detect CURRENT and NEXT gameweek automatically
-    # -------------------------------------------------------
     events = data["events"]
     current_gw = None
     next_gw = None
@@ -1668,10 +1447,9 @@ def main():
         if ev.get("is_next"):
             next_gw = ev["id"]
 
-    # Planning GW: normally the NEXT GW (upcoming deadline)
     if next_gw is not None:
-        PLAN_GW = next_gw  # e.g. 13
-        BASIS_GW = max(1, PLAN_GW - 1)  # use previous GW squad as pre-deadline team
+        PLAN_GW = next_gw
+        BASIS_GW = max(1, PLAN_GW - 1)
     else:
         PLAN_GW = current_gw
         BASIS_GW = max(1, PLAN_GW - 1)
@@ -1683,20 +1461,15 @@ def main():
         f"(your true pre-GW{PLAN_GW} team)."
     )
 
-    # This is the picks GW we actually use
     PICKS_GW = BASIS_GW
     picks_df, bank_tenths, value_tenths = fetch_manager_picks_and_bank(
         TEAM_ID, PICKS_GW
     )
 
-    # -------------------------------------------------------
-    # 3. Auto-generate output filenames for this run
-    # -------------------------------------------------------
     pred_start = PLAN_GW
     pred_end = PLAN_GW + NUM_GWS - 1
 
     global OUTPUT_ALL_CSV, OUTPUT_MYTEAM_CSV, OUTPUT_TRANSFERS_CSV, OUTPUT_DOUBLE_CSV, OUTPUT_MILP_PLAN_CSV
-
     OUTPUT_ALL_CSV = f"gw{pred_start}_to_gw{pred_end}_predictions_all.csv"
     OUTPUT_MYTEAM_CSV = f"gw{pred_start}_to_gw{pred_end}_predictions_myteam.csv"
     OUTPUT_TRANSFERS_CSV = (
@@ -1712,17 +1485,10 @@ def main():
     print(f"Predictions horizon: GW{pred_start}–GW{pred_end}")
     print("Output files will use this naming automatically.")
 
-    # -------------------------------------------------------
-    # 4. Predict points for the horizon (PLAN_GW → PLAN_GW+NUM_GWS-1)
-    # -------------------------------------------------------
     preds = multi_gw_predictions(players, fixtures, PLAN_GW, NUM_GWS)
 
-    # -------------------------------------------------------
-    # 5. Attach your team view (if picks are available)
-    # -------------------------------------------------------
     preds_all, preds_myteam = attach_manager_view(preds, picks_df)
 
-    # === Choose which columns to export ===
     gw_cols = [f"gw{gw}_points" for gw in range(PLAN_GW, PLAN_GW + NUM_GWS)]
     gw_cols_robust = [
         f"gw{gw}_points_robust" for gw in range(PLAN_GW, PLAN_GW + NUM_GWS)
@@ -1735,8 +1501,8 @@ def main():
         "team_short",
         "position",
         "price",
-        "multi_gw_points",  # raw total EP
-        "multi_gw_points_robust",  # robust (risk-adjusted) total EP
+        "multi_gw_points",
+        "multi_gw_points_robust",
     ] + gw_cols + gw_cols_robust
 
     all_cols = base_cols + [
@@ -1766,9 +1532,7 @@ def main():
     print(f"Saving ALL player predictions → {OUTPUT_ALL_CSV}")
     preds_all_out.to_csv(OUTPUT_ALL_CSV, index=False)
 
-    # -------------------------------------------------------
-    # 6. MILP Wildcard Optimisation (best possible squad)
-    # -------------------------------------------------------
+    # MILP Wildcard
     try:
         if value_tenths is not None and bank_tenths is not None:
             total_budget_m = (value_tenths + bank_tenths) / 10.0
@@ -1800,9 +1564,6 @@ def main():
     except Exception as e:
         print(f"MILP optimisation failed with error: {e}")
 
-    # -------------------------------------------------------
-    # 7. If we have your team, save personalised output + transfers
-    # -------------------------------------------------------
     if not preds_myteam.empty:
         existing_my_cols = [c for c in all_cols if c in preds_myteam.columns]
         sort_metric_my = (
@@ -1817,7 +1578,6 @@ def main():
         print(f"Saving YOUR TEAM predictions → {OUTPUT_MYTEAM_CSV}")
         preds_myteam_out.to_csv(OUTPUT_MYTEAM_CSV, index=False)
 
-        # Captain choices
         print("\n=== Suggested Captain Choices (Your Squad) ===")
         top_owned = preds_myteam_out.head(5)
         print(top_owned[["web_name", "team_short", "position", "multi_gw_points"]])
@@ -1831,7 +1591,6 @@ def main():
                 ]
             )
 
-        # Single-transfer ideas
         print("\n=== Single-Transfer Suggestions ===")
         suggestions_df = suggest_best_single_transfers_multi_gw(
             preds_all, preds_myteam, bank_tenths
@@ -1843,7 +1602,6 @@ def main():
         else:
             print("No profitable single-transfer upgrades found.")
 
-        # Double-transfer ideas (hybrid option C)
         print("\n=== Double-Transfer Suggestions ===")
         double_df = suggest_best_double_transfers_multi_gw(
             preds_all,
@@ -1860,9 +1618,6 @@ def main():
         else:
             print("No profitable 2-transfer combos found.")
 
-        # ---------------------------------------------------
-        # 8. MILP transfer optimiser (full-team optimisation)
-        # ---------------------------------------------------
         print("\n=== MILP Transfer Optimiser (full squad) ===")
         try:
             milp_squad, milp_transfers = optimise_transfers_milp(
@@ -1909,9 +1664,6 @@ def main():
             f"Squad Value: £{value_tenths/10.0:.1f}m"
         )
 
-        # ---------------------------------------------------
-        # 9. Multi-GW MILP transfer plan (sliding horizon)
-        # ---------------------------------------------------
         print("\n=== Multi-GW MILP Transfer Plan (sliding horizon) ===")
         try:
             squads_by_gw, milp_plan_df = optimise_transfers_milp_multi_horizon(
@@ -1923,8 +1675,8 @@ def main():
                 num_gws=NUM_GWS,
                 free_transfers_first_gw=FREE_TRANSFERS,
                 hit_cost=HIT_COST,
-                free_transfers_subsequent=1,  # normal FPL behaviour
-                max_extra_hits=8,  # "never more than –8"
+                free_transfers_subsequent=1,
+                max_extra_hits=8,
                 max_per_team=3,
             )
 
@@ -1938,7 +1690,6 @@ def main():
                 print("Multi-GW MILP optimiser did not return any transfer plan.")
         except Exception as e:
             print(f"Multi-GW MILP optimiser failed with error: {e}")
-
     else:
         print(
             "\n⚠ No picks available for your GW. Could not build personalised view."
