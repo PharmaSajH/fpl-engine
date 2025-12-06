@@ -399,7 +399,7 @@ def predict_gw_points(players, fixture_df):
     )
 
     # Fill missing fixture model values
-    preds["scoring_factor"] = preds["scoring_factor"].fillna(1.0).clip(0.6, 1.4)
+    preds["scoring_factor"] = preds["scoring_factor"].fillna(1.0).clip(0.8, 1.2)
     preds["cs_prob"] = preds["cs_prob"].fillna(0.0).clip(0.0, 1.0)
 
     # Ensure volatility exists
